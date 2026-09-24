@@ -1,0 +1,10 @@
+requests>=2.31.0
+selenium>=4.15.0
+undetected-chromedriver>=3.5.5
+webdriver-manager>=4.0.0
+pillow>=10.0.0
+vaderSentiment>=3.3.2
+openpyxl>=3.1.0
+praw>=7.7.0
+python-dotenv>=1.0.0
+numpy>=1.24.0

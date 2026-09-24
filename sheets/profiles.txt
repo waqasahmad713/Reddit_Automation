@@ -1,0 +1,2 @@
+# AdsPower profiles to open one by one (user_id, profile name, or serial).
+# 10 Reddit accounts — opened together, each does its own browse/comment/post.

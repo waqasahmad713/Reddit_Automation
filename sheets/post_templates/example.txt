@@ -1,0 +1,8 @@
+This is paragraph one. Keep a blank line under it so Reddit shows a real break.
+
+This is paragraph two.
+
+- bullets stay on their own lines
+- extra  spaces  inside a line are kept
+
+    Indented line stays indented.

@@ -1,0 +1,3 @@
+I set up an AI assistant to track deadlines and follow ups for our sales pipeline, then somehow connected it to the shared client calendar instead of my private one. It sent a reminder to a big prospect saying "friendly reminder that your proposal is overdue" when the proposal was ours to send. I found out because the client replied asking if we were waiting on them. I feel so embarrassed and this is SO awkward.
+
+I apologized, sent the proposal, and turned off every automatic message until we add an approval step. The worst part is my manager had asked me that morning to make our follow ups feel more personal. idk how I explain this one in the next team sync :/

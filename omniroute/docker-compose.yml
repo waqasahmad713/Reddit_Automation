@@ -1,0 +1,33 @@
+# Official OmniRoute image (built from their Dockerfile).
+# The joiner starts this for you. Manual: docker compose -f omniroute/docker-compose.yml up -d
+
+services:
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: omniroute
+    restart: unless-stopped
+    stop_grace_period: 40s
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: "20128"
+      HOSTNAME: "0.0.0.0"
+      DATA_DIR: /app/data
+      REQUIRE_API_KEY: "false"
+      JWT_SECRET: ${JWT_SECRET:-}
+      API_KEY_SECRET: ${API_KEY_SECRET:-}
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD:-CHANGEME}
+    volumes:
+      - omniroute-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  omniroute-data:
+    name: omniroute-data

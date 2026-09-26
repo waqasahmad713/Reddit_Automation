@@ -265,12 +265,13 @@ SUBREDDITS_PER_SESSION = (1, 3)  # rolled again each sitting from subreddits.csv
 SUBREDDIT_ROTATION_RUNS = 1  # prefer sheet communities not used last sitting
 RANDOM_EXPLORE_PER_SESSION = (1, 4)  # extra random communities, count changes every sitting
 EXPLORE_RANDOM_SUBS = True
+EXPLORE_SHARE = 0.30  # about 30% of communities this sitting are exploration
 # A random explore is skipped for this many later sittings on the same account,
 # then it can be explored again. Sheet communities (AskUK / NoStupidQuestions /
 # Advice) are never put on this cooldown.
 EXPLORE_SKIP_SESSIONS = 1
 EXPLORE_MEMORY = 12  # how many explore sittings to remember per account
-EXPLORE_RANDOM_TRIES = 6  # r/random attempts when the feed has nothing new
+EXPLORE_RANDOM_TRIES = 6  # unused; communities come from search or the live feed
 
 ACTIVITY_ON_HOMEPAGE = 12  # unused; home time comes from HOME_ACTIVITY_SHARE
 ACTIVITY_ON_SUBREDDIT = (12, 28)  # quick look inside a community, then back to Home
@@ -409,6 +410,7 @@ KARMA_GROWTH_ENABLED = True
 COMMUNITY_GENERAL_POST = True  # when posts.csv has no row, write one post that fits the community
 GENERAL_POSTS_PER_WEEK = POSTS_PER_WINDOW
 MIN_KARMA_TO_POST = 10  # no post until karma is 10; a community can still require more
+GENERAL_COMMENT_MIN_AGE_DAYS = 3  # karma 0 and younger than this: no general comment
 GENERAL_POST_DAYS = ACTION_WINDOW_DAYS
 KARMA_POST_DAYS = GENERAL_POST_DAYS
 KARMA_COMMENT_DAYS = GENERAL_COMMENT_DAYS
@@ -1156,6 +1158,51 @@ walk(document);
 return names.slice(0, 30);
 """
 
+_RELATED_SUB_JS = r"""
+const names = [];
+const seen = new Set();
+function add(href) {
+  const m = String(href || '').match(/\/r\/([A-Za-z0-9_]+)/i);
+  if (!m) return;
+  const n = m[1];
+  const low = n.toLowerCase();
+  if (seen.has(low)) return;
+  seen.add(low);
+  names.push(n);
+}
+function walk(root) {
+  let nodes = [];
+  try { nodes = root.querySelectorAll('a[href*="/r/"]'); } catch (e) { nodes = []; }
+  nodes.forEach(a => {
+    let blob = '';
+    try {
+      const box = (a.closest && a.closest('aside, section, nav, li')) || a.parentElement;
+      blob = ((box && (box.innerText || box.textContent)) || '').slice(0, 120).toLowerCase();
+    } catch (e) {}
+    const label = ((a.getAttribute('aria-label') || '') + ' ' + (a.innerText || a.textContent || '')).toLowerCase();
+    if (blob.includes('related') || blob.includes('similar') || label.includes('related') || label.includes('similar')) {
+      add(a.getAttribute('href'));
+    }
+  });
+  try {
+    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); });
+  } catch (e) {}
+}
+walk(document);
+if (!names.length) {
+  function walkAside(root) {
+    try {
+      root.querySelectorAll('aside a[href*="/r/"], [role="complementary"] a[href*="/r/"]').forEach(a => add(a.getAttribute('href')));
+    } catch (e) {}
+    try {
+      root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walkAside(el.shadowRoot); });
+    } catch (e) {}
+  }
+  walkAside(document);
+}
+return names.slice(0, 20);
+"""
+
 
 def _explore_pool(karma: int = 0, age_days: float = 0.0) -> List[str]:
     try:
@@ -1212,11 +1259,15 @@ def discover_explore_subreddits(
     seen: Optional[Iterable[str]] = None,
     user_id: str = "",
 ) -> List[str]:
-    """Find random communities from the feed, r/random, then a shuffled pool.
+    """Find communities the way a person would, never from r/random or a fixed list.
+
+    Each sitting uses a few of these: a community already on screen, a keyword
+    search, the search-box suggestions, related communities on the page, or
+    another feed (Popular, All, or Rising).
 
     `avoid` is hard: this run's sheet communities and anything already joined
     never come back. `seen` is the one-sitting cooldown — last session's
-    random explores are held back, then allowed again the sitting after that.
+    explores are held back, then allowed again the sitting after that.
     """
     need = max(0, int(want))
     if need <= 0:
@@ -1228,6 +1279,7 @@ def discover_explore_subreddits(
     soft.discard("")
     skip = hard | soft
     found: List[str] = []
+    seen_during_activity = collect_feed_subreddits(driver)
 
     def _take(name: str) -> bool:
         clean = _usable_explore_name(name, skip)
@@ -1237,10 +1289,10 @@ def discover_explore_subreddits(
         skip.add(clean.lower())
         return True
 
-    # Each sitting mixes sources in a new order and lets each source add only
-    # part of the list, so joins do not always come from the feed first.
-    sources = ["feed", "random", "popular", "pool"]
-    _rng().shuffle(sources)
+    # Each sitting uses a few of these. Never r/random and never a fixed name list.
+    catalog = ["activity", "search", "suggestions", "related", "listing"]
+    _rng().shuffle(catalog)
+    sources = catalog[: _rng().randint(2, 4)]
     quotas: Dict[str, int] = {}
     remaining = need
     for index, source in enumerate(sources):
@@ -1253,108 +1305,160 @@ def discover_explore_subreddits(
             continue
         if remaining == 1:
             take_n = 1 if _rng().random() < 0.5 else 0
-        elif index == 0:
-            take_n = _rng().randint(1, remaining - 1)
         else:
-            take_n = _rng().randint(0, remaining)
+            take_n = _rng().randint(1, remaining - 1)
         quotas[source] = take_n
         remaining -= take_n
     log(
-        f"[Profile {label}] Explore mix this sitting: "
-        + ", ".join(f"{source}×{quotas[source]}" for source in sources if quotas[source])
+        f"[Profile {label}] Finding communities this sitting by "
+        + " and ".join(f"{source}×{quotas[source]}" for source in sources if quotas[source])
     )
 
     def _room(source: str) -> int:
         return quotas.get(source, 0)
 
-    def _from_feed() -> None:
+    def _from_activity() -> None:
         added = 0
-        names = collect_feed_subreddits(driver)
+        names = list(seen_during_activity)
         _rng().shuffle(names)
         for name in names:
-            if added >= _room("feed") or len(found) >= need:
+            if added >= _room("activity") or len(found) >= need:
                 return
             if _take(name):
                 added += 1
-                log(f"[Profile {label}] Saw r/{name} on the feed — adding to explore")
+                log(f"[Profile {label}] Saw r/{name} during activity — will join it")
 
-    def _from_popular() -> None:
+    def _search_key() -> str:
+        try:
+            pool = _search_query_pool(None)
+        except Exception:
+            pool = []
+        phrase = pool[0] if pool else "beginner advice"
+        words = [word for word in phrase.split() if word]
+        if len(words) > 2:
+            phrase = " ".join(words[: _rng().randint(1, 2)])
+        return phrase
+
+    def _from_search() -> None:
         added = 0
-        if _room("popular") <= 0:
+        if _room("search") <= 0:
+            return
+        key = _search_key()
+        urls = (
+            "https://www.reddit.com/search/?q=" + quote_plus(key) + "&type=communities",
+            "https://www.reddit.com/search/?q=" + quote_plus(key) + "&type=link&sort=new",
+        )
+        names: List[str] = []
+        for url in urls:
+            try:
+                navigate(driver, url, label)
+                time.sleep(_rng().uniform(1.8, 3.4))
+                dismiss_popups(driver)
+            except Exception as exc:
+                log(f"[Profile {label}] Community search for \"{key}\" skipped ({brief_error(exc)})")
+                continue
+            for name in collect_feed_subreddits(driver):
+                if name.lower() not in {item.lower() for item in names}:
+                    names.append(name)
+            if len(names) >= _room("search"):
+                break
+        _rng().shuffle(names)
+        log(f"[Profile {label}] Searched communities for \"{key}\"")
+        for name in names:
+            if added >= _room("search") or len(found) >= need:
+                return
+            if _take(name):
+                added += 1
+                log(f"[Profile {label}] Search for \"{key}\" found r/{name} — will join it")
+
+    def _from_suggestions() -> None:
+        added = 0
+        if _room("suggestions") <= 0:
+            return
+        key = _search_key()
+        try:
+            if "/search" in (driver.current_url or ""):
+                navigate(driver, REDDIT_HOME_URL, label)
+                time.sleep(_rng().uniform(1.0, 2.0))
+            focused = driver.execute_script(_SEARCH_FOCUS_JS) == "focused"
+        except Exception as exc:
+            log(f"[Profile {label}] Search suggestions skipped ({brief_error(exc)})")
+            return
+        if not focused:
+            log(f"[Profile {label}] Search box was not open — suggestions skipped")
             return
         try:
-            navigate(driver, "https://www.reddit.com/r/popular/", label)
-            time.sleep(_rng().uniform(2.0, 4.4))
-            dismiss_popups(driver)
+            time.sleep(_rng().uniform(0.3, 0.8))
+            _type_into_focused(driver, key)
+            time.sleep(_rng().uniform(1.0, 1.8))
         except Exception as exc:
-            log(f"[Profile {label}] r/popular skipped ({brief_error(exc)})")
+            log(f"[Profile {label}] Could not type \"{key}\" for suggestions ({brief_error(exc)})")
             return
         names = collect_feed_subreddits(driver)
+        try:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            pass
         _rng().shuffle(names)
+        log(f"[Profile {label}] Typed \"{key}\" and read the search suggestions")
         for name in names:
-            if added >= _room("popular") or len(found) >= need:
+            if added >= _room("suggestions") or len(found) >= need:
                 return
             if _take(name):
                 added += 1
-                log(f"[Profile {label}] Saw r/{name} on r/popular — adding to explore")
+                log(f"[Profile {label}] Suggestion for \"{key}\" showed r/{name} — will join it")
 
-    def _from_random() -> None:
+    def _from_related() -> None:
         added = 0
-        tries = 0
-        limit = max(_room("random"), 0) + 2
-        while added < _room("random") and len(found) < need and tries < limit:
-            tries += 1
-            try:
-                navigate(driver, "https://www.reddit.com/r/random", label)
-                time.sleep(_rng().uniform(1.2, 2.2))
-                dismiss_popups(driver)
-                current = ""
-                try:
-                    current = driver.current_url or ""
-                except Exception:
-                    current = ""
-                name = subreddit_from_url(current)
-                if name and not claim_subreddit(name, user_id, wait=0):
-                    holder = subreddit_holder(name)
-                    who = f" ({holder})" if holder else ""
-                    log(
-                        f"[Profile {label}] r/random landed on r/{name}, already open "
-                        f"on another account{who} — leaving"
-                    )
-                    try:
-                        navigate(driver, REDDIT_HOME_URL, label)
-                    except Exception:
-                        pass
-                    release_all_held_subreddits(user_id)
-                    continue
-                if name:
-                    release_all_held_subreddits(user_id, keep=name)
-                time.sleep(_rng().uniform(1.0, 2.4))
-                if _take(name):
-                    added += 1
-                    log(f"[Profile {label}] r/random opened r/{name}")
-                elif name:
-                    release_all_held_subreddits(user_id)
-            except Exception as exc:
-                log(f"[Profile {label}] r/random skipped ({brief_error(exc)})")
-                break
+        if _room("related") <= 0:
+            return
+        try:
+            raw = driver.execute_script(_RELATED_SUB_JS) or []
+        except Exception:
+            raw = []
+        names = [str(item) for item in raw]
+        _rng().shuffle(names)
+        for name in names:
+            if added >= _room("related") or len(found) >= need:
+                return
+            if _take(str(name)):
+                added += 1
+                log(f"[Profile {label}] Related list showed r/{name} — will join it")
 
-    def _from_pool() -> None:
+    def _from_listing() -> None:
         added = 0
-        pool = _explore_pool(karma, age_days)
-        _rng().shuffle(pool)
-        for name in pool:
-            if added >= _room("pool") or len(found) >= need:
-                break
+        if _room("listing") <= 0:
+            return
+        title, url = _rng().choice(
+            (
+                ("Popular", "https://www.reddit.com/r/popular/"),
+                ("All", "https://www.reddit.com/r/all/"),
+                ("Rising", "https://www.reddit.com/r/all/rising/"),
+            )
+        )
+        try:
+            navigate(driver, url, label)
+            time.sleep(_rng().uniform(1.8, 3.2))
+            dismiss_popups(driver)
+        except Exception as exc:
+            log(f"[Profile {label}] {title} feed skipped ({brief_error(exc)})")
+            return
+        names = collect_feed_subreddits(driver)
+        _rng().shuffle(names)
+        log(f"[Profile {label}] Looking at the {title} feed for a community")
+        for name in names:
+            if added >= _room("listing") or len(found) >= need:
+                return
             if _take(name):
                 added += 1
-                log(f"[Profile {label}] Explore pool picked r/{name}")
+                log(f"[Profile {label}] Saw r/{name} on {title} — will join it")
 
     starters = {
-        "feed": _from_feed,
-        "random": _from_random,
-        "popular": _from_popular,
-        "pool": _from_pool,
+        "activity": _from_activity,
+        "search": _from_search,
+        "suggestions": _from_suggestions,
+        "related": _from_related,
+        "listing": _from_listing,
     }
     for source in sources:
         if len(found) >= need:
@@ -1363,29 +1467,16 @@ def discover_explore_subreddits(
         starters[source]()
         short = _room(source) - (len(found) - before)
         if short > 0:
-            # This source came up short. Hand its leftover to whatever runs next.
             for later in sources[sources.index(source) + 1 :]:
                 quotas[later] = quotas.get(later, 0) + short
                 break
 
-    if len(found) < need:
-        pool = _explore_pool(karma, age_days)
-        _rng().shuffle(pool)
-        for name in pool:
-            if len(found) >= need:
-                break
-            if _take(name):
-                log(f"[Profile {label}] Explore pool filled a gap with r/{name}")
-
     if len(found) < need and soft:
-        # Cooldown left nothing else. Lift it for this pass only so exploring
-        # still happens, while this sitting's sheet communities stay excluded.
         relaxed = set(hard)
         relaxed.update(item.lower() for item in found)
-        pool = _explore_pool(karma, age_days)
-        pool.extend(collect_feed_subreddits(driver))
-        _rng().shuffle(pool)
-        for name in pool:
+        names = collect_feed_subreddits(driver)
+        _rng().shuffle(names)
+        for name in names:
             if len(found) >= need:
                 break
             clean = _usable_explore_name(name, relaxed)
@@ -1393,7 +1484,7 @@ def discover_explore_subreddits(
                 continue
             found.append(clean)
             relaxed.add(clean.lower())
-            log(f"[Profile {label}] Revisiting r/{clean} — nothing new left to explore")
+            log(f"[Profile {label}] Saw r/{clean} again during activity — will join it")
 
     return found[:need]
 
@@ -1523,6 +1614,7 @@ class AccountSummary:
     already_member: List[str] = field(default_factory=list)
     join_failed: List[str] = field(default_factory=list)
     reddit_username: str = ""
+    account_status: str = ""
     account_karma: int = 0
     account_age_days: float = 0.0
     karma_tier: str = ""
@@ -1555,6 +1647,9 @@ class AccountSummary:
             f"ACCOUNT SUMMARY — {self.name}",
             f"  Profile ID : {self.user_id}",
         ]
+        if self.account_status:
+            lines.append(f"  Account status: {self.account_status}")
+            return lines
         if self.reddit_username:
             age = f"{self.account_age_days:.0f}d" if self.account_age_days else "?"
             lines.append(
@@ -4402,6 +4497,262 @@ def reddit_session_json(driver: WebDriver, url: str, label: str = "") -> Dict[st
     return {}
 
 
+_HOME_STATUS_JS = r"""
+function walk(root, fn) {
+  fn(root);
+  let nodes;
+  try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+  nodes.forEach(el => { if (el.shadowRoot) walk(el.shadowRoot, fn); });
+}
+const headings = [];
+let login = false;
+let avatar = false;
+walk(document, root => {
+  try {
+    root.querySelectorAll('h1, h2, [role="heading"]').forEach(el => {
+      const t = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim();
+      if (t && t.length < 140) headings.push(t);
+    });
+    root.querySelectorAll('a, button, [role="button"]').forEach(el => {
+      const t = ((el.innerText || el.textContent || el.getAttribute('aria-label') || '') + '')
+        .replace(/\s+/g, ' ').trim().toLowerCase();
+      if (t === 'log in' || t === 'login' || t === 'sign up' || t === 'sign in') login = true;
+      if (t.includes('profile menu') || t.includes('user menu') || t.includes('avatar')) avatar = true;
+    });
+  } catch (e) {}
+});
+let body = '';
+try { body = ((document.body && document.body.innerText) || '').slice(0, 1200); } catch (e) {}
+let posts = 0;
+try { posts = document.querySelectorAll('shreddit-post, article shreddit-post').length; } catch (e) {}
+return {
+  href: location.href || '',
+  title: document.title || '',
+  body: body,
+  headings: headings.slice(0, 12),
+  login: login,
+  avatar: avatar,
+  posts: posts
+};
+"""
+
+_BAN_PHRASES = (
+    "this account has been suspended",
+    "this account has been banned",
+    "account has been permanently banned",
+    "your account has been banned",
+    "your account is suspended",
+    "you've been banned",
+    "you have been banned",
+    "permanently suspended",
+)
+
+_SERVER_PHRASES = (
+    "server error",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "we had a server error",
+    "we had some trouble",
+)
+
+
+def home_account_block_reason(driver: WebDriver, logged_in: bool) -> str:
+    """What the open Home page is showing, or '' when this account can continue."""
+    try:
+        page = driver.execute_script(_HOME_STATUS_JS) or {}
+    except Exception:
+        page = {}
+    if not isinstance(page, dict):
+        page = {}
+    title = str(page.get("title") or "").lower()
+    href = str(page.get("href") or "").lower()
+    body = str(page.get("body") or "").lower()
+    headings = " ".join(str(item) for item in (page.get("headings") or [])).lower()
+    shown = f"{title}\n{headings}\n{body[:700]}"
+    if any(phrase in shown for phrase in _BAN_PHRASES):
+        return "account banned"
+    posts = int(page.get("posts") or 0)
+    server_page = posts == 0 and (
+        any(phrase in f"{title} {headings}" for phrase in _SERVER_PHRASES)
+        or bool(re.search(r"\b50[234]\b", title))
+    )
+    if server_page:
+        return "server error"
+    if logged_in:
+        return ""
+    login_page = "/login" in href or "/register" in href or bool(page.get("login"))
+    if login_page or not page.get("avatar"):
+        return "not logged in"
+    return ""
+
+
+_PROFILE_ICON_JS = r"""
+function walk(root, fn) {
+  fn(root);
+  let nodes;
+  try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+  nodes.forEach(el => { if (el.shadowRoot) walk(el.shadowRoot, fn); });
+}
+function visible(el) {
+  try {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return r.width > 10 && r.height > 10 && r.top >= 0 && r.top < 160
+      && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.1;
+  } catch (e) { return false; }
+}
+let best = null;
+let bestScore = 0;
+walk(document, root => {
+  let nodes = [];
+  try { nodes = root.querySelectorAll('button, a, [role="button"], img'); } catch (e) { return; }
+  nodes.forEach(el => {
+    if (!visible(el)) return;
+    const r = el.getBoundingClientRect();
+    if (r.left < window.innerWidth * 0.5) return;
+    const blob = (
+      (el.id || '') + ' ' +
+      (el.getAttribute('aria-label') || '') + ' ' +
+      (el.getAttribute('alt') || '') + ' ' +
+      (el.getAttribute('noun') || '') + ' ' +
+      (el.getAttribute('title') || '')
+    ).toLowerCase();
+    let score = r.right / window.innerWidth;
+    if (blob.includes('expand-user-drawer')) score += 12;
+    if (blob.includes('user_avatar') || blob.includes('user-avatar') || blob.includes('avatar')) score += 8;
+    if (blob.includes('profile menu') || blob.includes('user menu') || blob.includes('open profile')) score += 8;
+    if (blob.includes('profile')) score += 3;
+    if (el.tagName === 'IMG' && r.width <= 72 && r.height <= 72) score += 4;
+    if (score > bestScore) { bestScore = score; best = el; }
+  });
+});
+if (best && best.tagName === 'IMG' && best.closest) {
+  best = best.closest('button, a, [role="button"]') || best;
+}
+return bestScore >= 3 ? best : null;
+"""
+
+_HOVER_ERROR_JS = r"""
+function walk(root, fn) {
+  fn(root);
+  let nodes;
+  try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+  nodes.forEach(el => { if (el.shadowRoot) walk(el.shadowRoot, fn); });
+}
+function visible(el) {
+  try {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return r.width > 4 && r.height > 4
+      && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+  } catch (e) { return false; }
+}
+const bits = [];
+walk(document, root => {
+  let nodes = [];
+  try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+  nodes.forEach(el => {
+    if (!visible(el)) return;
+    try {
+      if (el.closest && el.closest('shreddit-post, article, shreddit-feed')) return;
+    } catch (e) {}
+    const t = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-label') || ''))
+      .replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!t || t.length > 320) return;
+    if (t.includes('we had a server') || t.includes('we had server')) bits.push(t);
+  });
+});
+return bits.join('\n');
+"""
+
+
+def _profile_icon(driver: WebDriver):
+    try:
+        return driver.execute_script(_PROFILE_ICON_JS)
+    except Exception:
+        return None
+
+
+def _hover_popup_text(driver: WebDriver) -> str:
+    try:
+        return str(driver.execute_script(_HOVER_ERROR_JS) or "").lower()
+    except Exception:
+        return ""
+
+
+def _popup_says_server_error(text: str) -> bool:
+    folded = re.sub(r"\s+", " ", text or "")
+    return "we had a server" in folded or "we had server" in folded
+
+
+def profile_icon_shows_server_error(driver: WebDriver, label: str) -> bool:
+    """Hold the cursor on the profile icon. That popup means the account is banned."""
+    icon = None
+    deadline = time.time() + 8.0
+    while time.time() < deadline and icon is None:
+        icon = _profile_icon(driver)
+        if icon is None:
+            time.sleep(0.4)
+    if icon is None:
+        log(f"[Profile {label}] No profile icon on Home — ban hover skipped")
+        return False
+    log(f"[Profile {label}] Holding the cursor on the profile icon")
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center', inline:'nearest'});", icon
+        )
+    except Exception:
+        pass
+    try:
+        ActionChains(driver).move_to_element(icon).pause(1.6).perform()
+    except Exception as exc:
+        log(f"[Profile {label}] Could not move onto the profile icon ({brief_error(exc)})")
+        return False
+    try:
+        driver.execute_script(
+            """
+            const el = arguments[0];
+            for (const type of ['mouseenter', 'mouseover', 'mousemove']) {
+              el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
+            }
+            """,
+            icon,
+        )
+    except Exception:
+        pass
+    time.sleep(1.4)
+    if _popup_says_server_error(_hover_popup_text(driver)):
+        log(f"[Profile {label}] Profile icon showed we had a server error")
+        return True
+    try:
+        ActionChains(driver).move_to_element(icon).pause(0.3).click().perform()
+    except Exception:
+        pass
+    time.sleep(1.2)
+    if _popup_says_server_error(_hover_popup_text(driver)):
+        log(f"[Profile {label}] Profile icon showed we had a server error")
+        return True
+    try:
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+    except Exception:
+        pass
+    return False
+
+
+def _account_payload_suspended(data: Dict[str, Any]) -> bool:
+    """True when Reddit's own account object says this user is suspended."""
+    if not isinstance(data, dict):
+        return False
+    if data.get("is_suspended") is True:
+        return True
+    inner = data.get("data")
+    if isinstance(inner, dict) and inner.get("is_suspended") is True:
+        return True
+    return False
+
+
 def read_logged_in_account(driver: WebDriver, label: str) -> Dict[str, Any]:
     payload = reddit_session_json(driver, "https://www.reddit.com/api/v1/me.json", label)
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
@@ -4432,6 +4783,14 @@ def read_logged_in_account(driver: WebDriver, label: str) -> Dict[str, Any]:
         comment_karma = 0
     if total <= 0:
         total = link_karma + comment_karma
+    suspended = _account_payload_suspended(data)
+    if name and not suspended:
+        about = reddit_session_json(
+            driver, f"https://www.reddit.com/user/{name}/about.json", label
+        )
+        about_data = about.get("data") if isinstance(about.get("data"), dict) else about
+        if _account_payload_suspended(about_data if isinstance(about_data, dict) else {}):
+            suspended = True
     return {
         "username": name,
         "karma": max(0, total),
@@ -4439,6 +4798,7 @@ def read_logged_in_account(driver: WebDriver, label: str) -> Dict[str, Any]:
         "comment_karma": max(0, comment_karma),
         "age_days": max(0.0, age_days),
         "created_utc": created,
+        "suspended": suspended,
     }
 
 
@@ -4878,15 +5238,22 @@ def decide_join_policy(
         and int(stats.comments or 0) < int(stats.session_comment_target or 0)
         and name.lower() in {item.lower() for item in allowed_subreddits()}
     )
-    if need_comment and policy == "lurk":
+    flags = getattr(rules, "flags", None) or {}
+    strict = float(getattr(rules, "strictness", 0) or 0)
+    rules_limit = bool(flags.get("account_gate")) or strict >= 0.45
+    if need_comment and policy == "lurk" and not rules_limit:
         log(
             f"[Profile {stats.name}] RL chose lurk on r/{name} — still commenting "
             "because this sitting still needs a general comment"
         )
         policy = "comment"
         chosen = "join:comment"
+    elif policy == "lurk" and rules_limit:
+        log(
+            f"[Profile {stats.name}] r/{name} rules say be careful "
+            "(karma, account age, or a strict community) — browsing only"
+        )
 
-    strict = float(getattr(rules, "strictness", 0) or 0)
     if policy == "lurk":
         reward = REWARD_JOIN_LURK_STRICT if strict >= 0.45 else -0.1
         if name and name not in stats.lurk_subs:
@@ -7461,6 +7828,19 @@ def extract_opened_post(driver: WebDriver) -> Dict[str, str]:
     return {"title": title, "body": body, "url": url}
 
 
+def _too_new_for_general_comment(stats: AccountSummary) -> bool:
+    """Karma 0 and younger than 3 days does not get a general comment."""
+    try:
+        karma = int(stats.account_karma or 0)
+    except (TypeError, ValueError):
+        karma = 0
+    try:
+        age = float(stats.account_age_days or 0.0)
+    except (TypeError, ValueError):
+        age = 0.0
+    return karma == 0 and age < float(GENERAL_COMMENT_MIN_AGE_DAYS)
+
+
 def maybe_ai_comment_on_opened_post(
     driver: WebDriver,
     label: str,
@@ -7477,6 +7857,12 @@ def maybe_ai_comment_on_opened_post(
         log(
             f"{prefix}Comment skipped — already used "
             f"{have_window}/{COMMENTS_PER_WINDOW} comments in {ACTION_WINDOW_HOURS:.0f}h"
+        )
+        return False
+    if kind != "sheet" and _too_new_for_general_comment(stats):
+        log(
+            f"{prefix}Comment skipped — karma is 0 and the account is under "
+            f"{GENERAL_COMMENT_MIN_AGE_DAYS} days old"
         )
         return False
     if kind != "sheet":
@@ -7604,6 +7990,17 @@ def maybe_ai_comment_on_opened_post(
             rules = None
     if rules is not None and getattr(rules, "titles", None):
         log(f"{prefix}Using r/{subreddit} rules ({rules.rule_count}): {', '.join(rules.titles[:4])}")
+    rule_flags = (getattr(rules, "flags", None) or {}) if rules is not None else {}
+    if kind != "sheet" and rule_flags.get("questions_only") and intent != "question":
+        log(
+            f"{prefix}Comment skipped — r/{subreddit} rules are questions only"
+        )
+        return False
+    if kind != "sheet" and rule_flags.get("account_gate") and _too_new_for_general_comment(stats):
+        log(
+            f"{prefix}Comment skipped — r/{subreddit} rules want karma or account age"
+        )
+        return False
     time.sleep(human.gaussian_between(*POST_READ_WAIT))
     # Read scaled to how long the post actually is, then think it over
     read_opened_thread(driver, 0.0, label)
@@ -10332,6 +10729,12 @@ def maybe_karma_growth_comments(
     session_subs: Optional[List[str]] = None,
     time_budget: Optional[float] = None,
 ) -> None:
+    if _too_new_for_general_comment(stats):
+        stats.karma_comment_note = (
+            f"karma 0 and under {GENERAL_COMMENT_MIN_AGE_DAYS} days — no general comment"
+        )
+        log(f"[Profile {label}] Skipping extra general comments — {stats.karma_comment_note}")
+        return
     if not KARMA_GROWTH_ENABLED:
         return
     target = stats.session_comment_target or _rng().randint(*SESSION_GENERAL_COMMENTS)
@@ -11315,21 +11718,52 @@ def process_profile(
         wait_for_proxy_ip(driver, label, user_id)
 
         log(f"[Profile {label}] Step 1 done — proxy IP ready. Opening Reddit Home.")
-        open_reddit_home_ready(driver, label)
+        try:
+            open_reddit_home_ready(driver, label)
+        except RuntimeError:
+            blocked = home_account_block_reason(driver, False)
+            if not blocked:
+                raise
+            stats.account_status = blocked
+            log(f"[Profile {label}] Closing this account — {blocked}")
+            stats.print_report()
+            return stats
+        logged_in = False
         try:
             info = read_logged_in_account(driver, label)
             apply_account_analysis(stats, info)
-            if stats.reddit_username:
-                log(
-                    f"[Profile {label}] Account u/{stats.reddit_username} | "
-                    f"karma {stats.account_karma} "
-                    f"(link {info.get('link_karma', 0)}, comment {info.get('comment_karma', 0)}) | "
-                    f"age {stats.account_age_days:.0f} days | tier {stats.karma_tier}"
-                )
-            else:
-                log(f"[Profile {label}] Could not read karma/age — treating this account as new")
+            logged_in = bool(stats.reddit_username)
         except Exception as exc:
             log(f"[Profile {label}] Account analysis failed ({brief_error(exc)})")
+            info = {}
+        if info.get("suspended"):
+            stats.account_status = "the account is banned"
+            who = f"u/{stats.reddit_username} " if stats.reddit_username else ""
+            log(f"[Profile {label}] Account check: {who}account banned — closing")
+            stats.print_report()
+            return stats
+        blocked = home_account_block_reason(driver, logged_in)
+        if blocked:
+            stats.account_status = blocked
+            log(f"[Profile {label}] Closing this account — {blocked}")
+            stats.print_report()
+            return stats
+        if profile_icon_shows_server_error(driver, label):
+            stats.account_status = "the account is banned"
+            log(f"[Profile {label}] Closing this account — the account is banned")
+            stats.print_report()
+            return stats
+        if logged_in:
+            log(f"[Profile {label}] Account check: u/{stats.reddit_username} is not banned")
+        if stats.reddit_username:
+            log(
+                f"[Profile {label}] Account u/{stats.reddit_username} | "
+                f"karma {stats.account_karma} "
+                f"(link {info.get('link_karma', 0)}, comment {info.get('comment_karma', 0)}) | "
+                f"age {stats.account_age_days:.0f} days | tier {stats.karma_tier}"
+            )
+        else:
+            log(f"[Profile {label}] Could not read karma/age — treating this account as new")
 
         style, browse_list, fingerprint = unique_session_plan(
             user_id,
@@ -11381,6 +11815,12 @@ def process_profile(
         stats.session_comment_target = min(
             _rng().randint(*SESSION_GENERAL_COMMENTS), general_room
         )
+        if _too_new_for_general_comment(stats):
+            stats.session_comment_target = 0
+            general_room = 0
+            stats.karma_comment_note = (
+                f"karma 0 and under {GENERAL_COMMENT_MIN_AGE_DAYS} days — no general comment"
+            )
         has_sheet_post = bool(_sheet_post_communities(user_id, label, serial))
         sheet_target = (
             _primary_sheet_post_subreddit(user_id, label, serial)
@@ -11398,6 +11838,16 @@ def process_profile(
                 f"[Profile {label}] No general comment on a random post this sitting — "
                 f"{COMMENTS_PER_WINDOW}/{COMMENTS_PER_WINDOW} comments already used in "
                 f"{ACTION_WINDOW_HOURS:.0f}h. Next slot in {wait_h:.1f}h"
+            )
+        elif _too_new_for_general_comment(stats):
+            sheet_note = (
+                f" comments.csv still has {sheet_slots} link(s)."
+                if has_sheet_links
+                else ""
+            )
+            log(
+                f"[Profile {label}] No general comment — karma is 0 and the account "
+                f"is under {GENERAL_COMMENT_MIN_AGE_DAYS} days old.{sheet_note}"
             )
         elif has_sheet_links:
             log(
@@ -11429,8 +11879,17 @@ def process_profile(
             log(
                 f"[Profile {label}] Post already used in the last {ACTION_WINDOW_HOURS:.0f}h — browse only"
             )
-        want_explore = max(0, int(style.explore_n))
+        sheet_n = max(1, len(browse_list))
+        explore_target = (EXPLORE_SHARE * sheet_n) / (1.0 - EXPLORE_SHARE)
+        want_explore = int(explore_target)
+        if _rng().random() < (explore_target - want_explore):
+            want_explore += 1
         expected_hops = max(1, len(browse_list) + want_explore)
+        log(
+            f"[Profile {label}] Exploration {EXPLORE_SHARE:.0%} — "
+            f"{want_explore} extra communit{'y' if want_explore == 1 else 'ies'}, "
+            f"{len(browse_list)} from subreddits.csv"
+        )
         home_first, home_between = plan_home_budget(
             style.session_seconds,
             expected_hops,
@@ -11493,8 +11952,9 @@ def process_profile(
                 remember_explored_subreddits(user_id, explore)
                 stats.explored = list(explore)
                 log(
-                    f"[Profile {label}] Exploring {len(explore)} random "
+                    f"[Profile {label}] Will join {len(explore)} "
                     f"communit{'y' if len(explore) == 1 else 'ies'} "
+                    f"found by search, suggestions, related communities, or a feed "
                     f"(skip next sitting): "
                     + ", ".join(f"r/{name}" for name in explore)
                 )
@@ -11513,6 +11973,13 @@ def process_profile(
             or (COMMUNITY_GENERAL_POST and not has_sheet_post)
         )
         hops = sheet_hops + other_hops
+        hops = [
+            name
+            for name in hops
+            if name.lower() in allowed_set
+            or name.lower() in {item.lower() for item in explore}
+            or (sheet_target and name.lower() == sheet_target.lower())
+        ]
         _rng().shuffle(hops)
         # A comment or general post still needs a sheet community early enough
         # to fit. Its slot is random inside the first half, not always first.
@@ -11549,10 +12016,11 @@ def process_profile(
         if comment_indexes and stats.session_comment_target:
             slot_count = min(stats.session_comment_target, len(comment_indexes))
             comment_slots = set(_rng().sample(comment_indexes, slot_count))
+        explore_keys = {item.lower() for item in explore}
         log(
-            f"[Profile {label}] Hop order this sitting: "
+            f"[Profile {label}] Random order ({EXPLORE_SHARE:.0%} exploration): "
             + " → ".join(
-                ("r/" + name + ("*" if name.lower() in allowed_set else " (explore)"))
+                "r/" + name + (" (explore)" if name.lower() in explore_keys else "")
                 for name in hops
             )
             or "Home only"

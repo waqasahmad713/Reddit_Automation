@@ -188,58 +188,42 @@ def is_commentable_intent(intent: str) -> bool:
 
 
 def local_comment_for_post(analysis: Dict[str, object]) -> str:
-    """Fallback comment that still mentions the post topic. Never a canned one-liner."""
-    keywords = analysis.get("keywords") or []
-    if isinstance(keywords, list) and keywords:
-        hook = " ".join(str(word) for word in keywords[:3])
-    else:
-        hook = str(analysis.get("topic") or "this")
-    hook = re.sub(r"[^A-Za-z0-9 ']+", " ", hook)
-    hook = re.sub(r"\s+", " ", hook).strip()
-    if len(hook) > 42:
-        hook = hook[:39].rstrip() + "..."
-    if not hook:
-        hook = "this"
-    mood = str(analysis.get("mood") or "neutral")
+    """Fallback comment that answers this post, not a canned one-liner."""
+    title = re.sub(r"\s+", " ", str(analysis.get("title") or "")).strip()
+    words = title.split()
+    detail = " ".join(words[:8]).strip(" ?.!")
+    if len(detail) > 60:
+        detail = detail[:57].rstrip() + "..."
+    if len(detail) < 8:
+        detail = str(analysis.get("topic") or "what you described").strip()
     intent = str(analysis.get("intent") or "other")
     if intent == "help":
         options = [
-            f"For the {hook} side of this, I'd start with one small step and see how it feels before changing everything.",
-            f"On {hook}, you're not alone — a lot of people hit this. What have you already tried that didn't stick?",
-            f"I'd treat the {hook} part carefully. If you share one more detail about your setup, people can give sharper advice.",
+            f"The {detail} part is the one I'd deal with first. What's the main thing you've already tried?",
+            f"I've been stuck on something like {detail} too. One small change is usually enough to see if you're on the right track.",
+            f"For {detail}, I'd start with the simplest fix and only change one thing. Happy to narrow it if you say what failed.",
         ]
     elif intent == "suggestion":
         options = [
-            f"If you're weighing options around {hook}, I'd pick the simplest one you can stick with for a week first.",
-            f"For {hook}, my vote would be whatever is easiest to undo if it doesn't fit — less pressure that way.",
-            f"On {hook}, maybe try the lower-commitment option first and only upgrade if you actually use it.",
+            f"If I were choosing for {detail}, I'd take the option you can undo easily and live with it for a week.",
+            f"On {detail}, the lower-commitment option is the one I'd try first. Which limit matters more for you, time or money?",
+            f"For {detail} I'd skip the fancy version until you know you'll actually use it. What are you leaning toward?",
         ]
     elif intent == "review":
         options = [
-            f"Curious about the {hook} angle — was there one thing that felt better or worse than you expected?",
-            f"Good to hear real thoughts on {hook}. The everyday details are usually more useful than the marketing.",
-            f"On {hook}, the practical bits matter most. Would you buy/use it again knowing what you know now?",
+            f"The bit about {detail} is what I'd want more of. Was there one thing that was better or worse than you expected?",
+            f"Useful write-up on {detail}. Would you pick it again, or is there something you'd change?",
+            f"The everyday detail on {detail} is the useful part. How long have you actually been using it?",
         ]
     elif intent == "question":
         options = [
-            f"On {hook}, I don't have a perfect answer, but from what I've seen the short version is: start small and compare notes with people in a similar spot.",
-            f"Interesting question about {hook}. What's the constraint that matters most for you — time, budget, or simplicity?",
-            f"For {hook}, I'd look at what you already have in place first — that usually narrows the real options fast.",
-        ]
-    elif mood == "negative":
-        options = [
-            f"That's rough. Hope the {hook} situation gets easier.",
-            f"Sorry you're dealing with {hook}. Not an easy thing to post.",
-        ]
-    elif mood == "positive":
-        options = [
-            f"The {hook} part actually clicked for me.",
-            f"Nice angle on {hook}. Glad you wrote this up.",
+            f"On {detail}, I'd start from what you already have and only add something if it clearly fills a gap. What's the must-have for you?",
+            f"Short version for {detail}: keep it simple and compare with someone in the same spot. What constraint is blocking you?",
+            f"For {detail} the answer usually depends on budget versus how much hassle you'll tolerate. Which one is tighter?",
         ]
     else:
         options = [
-            f"Hadn't looked at {hook} that way. Thanks for laying it out.",
-            f"The {hook} bit is what stuck with me.",
+            f"The {detail} part is what I actually wanted to reply to. Curious how that played out for you.",
         ]
     return _clean_comment(random.choice(options))
 
@@ -811,6 +795,19 @@ def _llm_text(
     raise RuntimeError("; ".join(errors) or "AI request failed")
 
 
+def _comment_uses_post(comment: str, title: str, body: str) -> bool:
+    """True when the reply names something from this post, not a generic line."""
+    words = [
+        word.lower()
+        for word in re.findall(r"[A-Za-z][A-Za-z']{4,}", f"{title}\n{(body or '')[:500]}")
+        if word.lower() not in _STOP
+    ]
+    if not words:
+        return True
+    blob = (comment or "").lower()
+    return any(word in blob for word in words[:12])
+
+
 def generate_ai_comment(
     title: str,
     body: str,
@@ -826,9 +823,14 @@ def generate_ai_comment(
     info = analysis or analyze_post(title, body, subreddit)
     mood = str(info.get("mood") or "neutral")
     intent = str(info.get("intent") or classify_post_intent(title, body))
-    topic = str(info.get("topic") or title or "this").strip()
+    if not is_commentable_intent(intent):
+        raise RuntimeError(
+            "post is not help, suggestion, review, or question"
+        )
     place = f"r/{subreddit.strip()}" if (subreddit or "").strip() else "this Reddit community"
     style = (tone or "friendly").strip().lower()
+    if style == "funny":
+        style = "friendly"
     if mood == "negative":
         style = "neutral"
     tone_line = {
@@ -844,22 +846,21 @@ def generate_ai_comment(
     }.get(mood, "Stay on the actual topic.")
     intent_line = {
         "help": (
-            "This person is asking for help. Give one practical, humble suggestion or clarifying "
-            "question about their situation. Do not lecture or dump a long list."
+            "They need help. Give one practical next step from their actual situation, "
+            "then ask one short question so they can reply. Sound like you have dealt with this, not like a guide."
         ),
         "suggestion": (
-            "They want recommendations or ideas. Offer one concrete suggestion tied to what they wrote, "
-            "or ask one short question that helps narrow options."
+            "They want ideas. Recommend one specific option that fits what they wrote, "
+            "and ask which limit matters more so the thread keeps going."
         ),
         "review": (
-            "This is a review / thoughts / 'is it worth it' post. React to a specific detail and share "
-            "a brief honest take or question about their experience."
+            "This is a review or 'is it worth it' post. React to one detail they mentioned "
+            "and ask whether they would choose it again or what surprised them."
         ),
         "question": (
-            "They asked a direct question and the thread may still be empty. Answer the question briefly "
-            "and helpfully, or ask one clarifying question if a detail is missing. Do not ignore the ask."
+            "Answer their actual question in plain words. Then ask one follow-up that a person "
+            "in the thread would actually answer."
         ),
-        "other": "Reply to what they actually said. Avoid generic praise.",
     }.get(intent, "Reply to what they actually said.")
     rule_blob = re.sub(r"\s+", " ", (rules or "").strip())[:900]
     rule_line = (
@@ -868,20 +869,31 @@ def generate_ai_comment(
         else ""
     )
     prompt = (
-        f"Write one short, natural Reddit comment (1-2 sentences) for {place}. "
+        f"Write one Reddit comment (1-2 sentences) for {place}. "
         f"{tone_line} {mood_line} {intent_line}{rule_line} "
-        "Sound like a real person. Do not list keywords. Do not start with Yeah/Nice take on. "
-        "Mention something specific from the title or body. "
+        "Write the way a person types on their phone: contractions, a little uneven, no essay. "
+        "Use a real detail from the title or body (a product, place, problem, or choice). "
+        "Do not say great post, thanks for sharing, nice write-up, or hope this helps. "
+        "Do not list keywords. Do not start with Yeah, Absolutely, or Nice take. "
         "No hashtags, no quotes around the whole comment, no username, no asking for upvotes.\n\n"
         f"Title: {title}\n\n{(body or '')[:1200]}"
     )
     system = (
-        "You write brief Reddit comments that clearly respond to the post. "
+        "You write short Reddit comments that answer the post and invite a reply. "
+        "Only comment as if this is a help request, a suggestion thread, a review, or a question. "
         "Follow the community rules if they were given. "
         "Never mention being a bot, karma, or that the account is new."
     )
     text, provider = _llm_text(prompt, system, max_tokens=160, fast=True, prefer="openai")
     cleaned = _clean_comment(text)
+    if cleaned and not _comment_uses_post(cleaned, title, body):
+        retry = (
+            prompt
+            + "\n\nYour comment must name a specific detail from the title or body. "
+            "Do not write a generic reply."
+        )
+        text, provider = _llm_text(retry, system, max_tokens=160, fast=True, prefer="openai")
+        cleaned = _clean_comment(text)
     if not cleaned:
         # The old loose path posted raw model output whenever cleaning came back
         # empty, skipping every filter above — which is exactly how a refusal or

@@ -1757,6 +1757,48 @@ def next_session_number() -> int:
     return highest + 1
 
 
+def session_tally_lines(reports: List[AccountSummary]) -> List[str]:
+    """How many accounts did activity, and how many were banned."""
+    banned = [
+        item
+        for item in reports
+        if "banned" in (item.account_status or "").lower()
+    ]
+    active = []
+    for item in reports:
+        if item in banned or (item.account_status or "").strip():
+            continue
+        if (
+            item.session_style_note
+            or item.comments
+            or item.sheet_comments
+            or item.upvotes
+            or item.joined
+            or item.scrolled_px
+            or item.searches
+            or item.posted
+            or item.explored
+        ):
+            active.append(item)
+    banned_names = [
+        f"u/{item.reddit_username}" if item.reddit_username else (item.name or item.user_id)
+        for item in banned
+    ]
+    comments = sum(int(item.comments or 0) + int(item.sheet_comments or 0) for item in active)
+    joins = sum(len(item.joined) for item in active)
+    upvotes = sum(int(item.upvotes or 0) for item in active)
+    posts = sum(1 for item in active if (item.posted or "").strip())
+    return [
+        f"Accounts that did activity : {len(active)}",
+        f"Accounts banned            : {len(banned)}",
+        f"Banned accounts            : {', '.join(banned_names) if banned_names else 'none'}",
+        (
+            f"Activity                   : {comments} comments, "
+            f"{joins} joins, {upvotes} upvotes, {posts} posts"
+        ),
+    ]
+
+
 def write_session_summary(reports: List[AccountSummary]) -> str:
     """Write session N + each account summary to data/summaries/session_N.txt."""
     number = next_session_number()
@@ -1769,6 +1811,7 @@ def write_session_summary(reports: List[AccountSummary]) -> str:
         f"SESSION {number}",
         f"Date     : {when}",
         f"Accounts : {len(reports)}",
+        *session_tally_lines(reports),
         f"Names    : {', '.join(accounts) if accounts else 'none'}",
         "",
         "ACCOUNTS",
@@ -12839,6 +12882,8 @@ def main() -> int:
 
     log("")
     log("FINAL SUMMARY BY ACCOUNT")
+    for line in session_tally_lines(reports):
+        log(line)
     for item in reports:
         item.print_report()
     try:

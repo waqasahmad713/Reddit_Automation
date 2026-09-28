@@ -4674,7 +4674,23 @@ walk(document, root => {
 if (best && best.tagName === 'IMG' && best.closest) {
   best = best.closest('button, a, [role="button"]') || best;
 }
-return bestScore >= 3 ? best : null;
+if (best && bestScore >= 3) return best;
+let fallback = null;
+let fallbackRight = 0;
+walk(document, root => {
+  let nodes = [];
+  try { nodes = root.querySelectorAll('button, a, [role="button"], img'); } catch (e) { return; }
+  nodes.forEach(el => {
+    if (!visible(el)) return;
+    const r = el.getBoundingClientRect();
+    if (r.left < window.innerWidth * 0.72 || r.width > 80 || r.height > 80) return;
+    if (r.right > fallbackRight) { fallbackRight = r.right; fallback = el; }
+  });
+});
+if (fallback && fallback.tagName === 'IMG' && fallback.closest) {
+  fallback = fallback.closest('button, a, [role="button"]') || fallback;
+}
+return fallback || (bestScore >= 3 ? best : null);
 """
 
 _HOVER_ERROR_JS = r"""
@@ -4703,8 +4719,8 @@ walk(document, root => {
     } catch (e) {}
     const t = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-label') || ''))
       .replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t || t.length > 320) return;
-    if (t.includes('we had a server') || t.includes('we had server')) bits.push(t);
+    if (!t) return;
+    if (t.includes('we had a server') || t.includes('we had server')) bits.push(t.slice(0, 500));
   });
 });
 return bits.join('\n');
@@ -11924,9 +11940,7 @@ def process_profile(
             )
         sheet_n = max(1, len(browse_list))
         explore_target = (EXPLORE_SHARE * sheet_n) / (1.0 - EXPLORE_SHARE)
-        want_explore = int(explore_target)
-        if _rng().random() < (explore_target - want_explore):
-            want_explore += 1
+        want_explore = max(1, int(round(explore_target)))
         expected_hops = max(1, len(browse_list) + want_explore)
         log(
             f"[Profile {label}] Exploration {EXPLORE_SHARE:.0%} — "

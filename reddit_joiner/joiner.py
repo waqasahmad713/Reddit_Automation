@@ -411,6 +411,9 @@ COMMUNITY_GENERAL_POST = True  # when posts.csv has no row, write one post that 
 GENERAL_POSTS_PER_WEEK = POSTS_PER_WINDOW
 MIN_KARMA_TO_POST = 10  # no post until karma is 10; a community can still require more
 GENERAL_COMMENT_MIN_AGE_DAYS = 3  # karma 0 and younger than this: no general comment
+WARMUP_MIN_AGE_DAYS = 7  # under this age: browse only
+WARMUP_MIN_KARMA = 5  # under this karma: browse only
+MAX_JOINS_PER_SESSION = 1  # one new Join click per sitting after warmup
 GENERAL_POST_DAYS = ACTION_WINDOW_DAYS
 KARMA_POST_DAYS = GENERAL_POST_DAYS
 KARMA_COMMENT_DAYS = GENERAL_COMMENT_DAYS
@@ -986,7 +989,11 @@ def visit_sheet_post_community(
         pass
     if join:
         try:
-            _record_join(stats, name, join_subreddit(driver, label, name))
+            _record_join(
+                stats,
+                name,
+                join_if_allowed(driver, label, stats, name, for_post=True),
+            )
         except Exception as exc:
             log(
                 f"[Profile {label}] Join on r/{name} skipped "
@@ -2211,6 +2218,8 @@ def general_comment_need(
 
 
 def account_may_post(stats: AccountSummary) -> Tuple[bool, str]:
+    if account_in_warmup(stats):
+        return False, warmup_reason(stats)
     karma = int(stats.account_karma or 0)
     if karma < MIN_KARMA_TO_POST:
         return (
@@ -7084,6 +7093,8 @@ def upvote_random_post(
 ) -> bool:
     """Click a random un-upvoted upvote button. Never clicks downvote."""
     prefix = f"[Profile {label}] " if label else ""
+    if stats is not None and account_in_warmup(stats):
+        return False
     key = label or "browser"
     gap = _rng().uniform(*MIN_UPVOTE_GAP)
     if time.time() - _last_upvote_at.get(key, 0.0) < gap:
@@ -7522,6 +7533,9 @@ def comment_on_current_post(
 ) -> bool:
     """Open the composer, type like a person, submit, and confirm the comment is on the page."""
     prefix = f"[Profile {label}] " if label else ""
+    if stats is not None and account_in_warmup(stats):
+        log(f"{prefix}Comment skipped — {warmup_reason(stats)}")
+        return False
     body = (text or "").strip()
     if len(re.findall(r"[A-Za-z]", body)) < 18:
         log(f"{prefix}Comment skipped — text too short to look real")
@@ -7887,8 +7901,7 @@ def extract_opened_post(driver: WebDriver) -> Dict[str, str]:
     return {"title": title, "body": body, "url": url}
 
 
-def _too_new_for_general_comment(stats: AccountSummary) -> bool:
-    """Karma 0 and younger than 3 days does not get a general comment."""
+def _account_karma_age(stats: AccountSummary) -> Tuple[int, float]:
     try:
         karma = int(stats.account_karma or 0)
     except (TypeError, ValueError):
@@ -7897,6 +7910,65 @@ def _too_new_for_general_comment(stats: AccountSummary) -> bool:
         age = float(stats.account_age_days or 0.0)
     except (TypeError, ValueError):
         age = 0.0
+    return karma, age
+
+
+def account_in_warmup(stats: AccountSummary) -> bool:
+    """First week is browse-only. After that, comments are how karma is earned."""
+    karma, age = _account_karma_age(stats)
+    if age >= float(WARMUP_MIN_AGE_DAYS):
+        return False
+    if age >= 1.0:
+        return True
+    # Age was not read. Keep a low-karma account in browse-only until it is.
+    return karma < WARMUP_MIN_KARMA
+
+
+def warmup_reason(stats: AccountSummary) -> str:
+    karma, age = _account_karma_age(stats)
+    if age >= 1.0:
+        return (
+            f"warmup — account is {age:.0f} days old (need {WARMUP_MIN_AGE_DAYS}). "
+            "Browse only until then. Comments after that are what raise karma"
+        )
+    return (
+        f"warmup — age was not read and karma is {karma}. "
+        "Browse only until the account age can be read"
+    )
+
+
+def may_join_now(stats: AccountSummary, *, for_post: bool = False) -> Tuple[bool, str]:
+    if account_in_warmup(stats):
+        return False, warmup_reason(stats)
+    if for_post:
+        return True, ""
+    if len(stats.joined) >= MAX_JOINS_PER_SESSION:
+        return (
+            False,
+            f"already joined {len(stats.joined)} community this sitting",
+        )
+    return True, ""
+
+
+def join_if_allowed(
+    driver: WebDriver,
+    label: str,
+    stats: AccountSummary,
+    subreddit: str,
+    *,
+    for_post: bool = False,
+) -> str:
+    allowed, reason = may_join_now(stats, for_post=for_post)
+    name = normalize_subreddit(subreddit)
+    if not allowed:
+        log(f"[Profile {label}] Not joining r/{name} — {reason}")
+        return "skipped"
+    return join_subreddit(driver, label, name)
+
+
+def _too_new_for_general_comment(stats: AccountSummary) -> bool:
+    """Karma 0 and younger than 3 days does not get a general comment."""
+    karma, age = _account_karma_age(stats)
     return karma == 0 and age < float(GENERAL_COMMENT_MIN_AGE_DAYS)
 
 
@@ -7917,6 +7989,9 @@ def maybe_ai_comment_on_opened_post(
             f"{prefix}Comment skipped — already used "
             f"{have_window}/{COMMENTS_PER_WINDOW} comments in {ACTION_WINDOW_HOURS:.0f}h"
         )
+        return False
+    if account_in_warmup(stats):
+        log(f"{prefix}Comment skipped — {warmup_reason(stats)}")
         return False
     if kind != "sheet" and _too_new_for_general_comment(stats):
         log(
@@ -10788,9 +10863,13 @@ def maybe_karma_growth_comments(
     session_subs: Optional[List[str]] = None,
     time_budget: Optional[float] = None,
 ) -> None:
-    if _too_new_for_general_comment(stats):
+    if account_in_warmup(stats) or _too_new_for_general_comment(stats):
         stats.karma_comment_note = (
-            f"karma 0 and under {GENERAL_COMMENT_MIN_AGE_DAYS} days — no general comment"
+            warmup_reason(stats)
+            if account_in_warmup(stats)
+            else (
+                f"karma 0 and under {GENERAL_COMMENT_MIN_AGE_DAYS} days — no general comment"
+            )
         )
         log(f"[Profile {label}] Skipping extra general comments — {stats.karma_comment_note}")
         return
@@ -10861,7 +10940,7 @@ def maybe_karma_growth_comments(
                 continue
             time.sleep(_rng().uniform(1.2, 2.0))
             dismiss_popups(driver)
-            _record_join(stats, subreddit, join_subreddit(driver, label, subreddit))
+            _record_join(stats, subreddit, join_if_allowed(driver, label, stats, subreddit))
             time.sleep(_rng().uniform(1.2, 2.4))
             took = leave_subreddit_comments(
                 driver, label, user_id, stats, subreddit, min(left, 1)
@@ -11005,7 +11084,11 @@ def maybe_karma_growth_post(
                 continue
             time.sleep(_rng().uniform(1.4, 2.4))
             dismiss_popups(driver)
-            _record_join(stats, subreddit, join_subreddit(driver, label, subreddit))
+            _record_join(
+                stats,
+                subreddit,
+                join_if_allowed(driver, label, stats, subreddit, for_post=True),
+            )
             time.sleep(_rng().uniform(1.0, 1.8))
             posted_url, submit_reason = submit_text_post(driver, label, subreddit, title, body)
             if not posted_url:
@@ -11082,6 +11165,10 @@ def maybe_leave_weekly_comments(
     stats: AccountSummary,
     serial: str = "",
 ) -> None:
+    if account_in_warmup(stats):
+        stats.comment_note = warmup_reason(stats)
+        log(f"[Profile {label}] Skipping comments.csv — {stats.comment_note}")
+        return
     have = len(general_comments_this_week(user_id))
     room = comments_remaining(user_id)
     if room <= 0:
@@ -11392,7 +11479,9 @@ def maybe_submit_weekly_post(
                 read_subreddit_rules(driver, label, target, stats, open_page=False)
             except Exception:
                 pass
-            join_status = join_subreddit(driver, label, target)
+            join_status = join_if_allowed(
+                driver, label, stats, target, for_post=True
+            )
             if join_status == "joined":
                 stats.joined.append(target)
             elif join_status == "already_joined" and target not in stats.already_member and target not in stats.joined:
@@ -11874,7 +11963,12 @@ def process_profile(
         stats.session_comment_target = min(
             _rng().randint(*SESSION_GENERAL_COMMENTS), general_room
         )
-        if _too_new_for_general_comment(stats):
+        if account_in_warmup(stats):
+            stats.session_comment_target = 0
+            general_room = 0
+            stats.karma_comment_note = warmup_reason(stats)
+            log(f"[Profile {label}] {warmup_reason(stats)}")
+        elif _too_new_for_general_comment(stats):
             stats.session_comment_target = 0
             general_room = 0
             stats.karma_comment_note = (
@@ -11941,6 +12035,11 @@ def process_profile(
         sheet_n = max(1, len(browse_list))
         explore_target = (EXPLORE_SHARE * sheet_n) / (1.0 - EXPLORE_SHARE)
         want_explore = max(1, int(round(explore_target)))
+        if account_in_warmup(stats):
+            want_explore = 0
+            log(
+                f"[Profile {label}] Warmup — no extra communities this sitting"
+            )
         expected_hops = max(1, len(browse_list) + want_explore)
         log(
             f"[Profile {label}] Exploration {EXPLORE_SHARE:.0%} — "
@@ -12256,12 +12355,12 @@ def process_profile(
                     )
 
                 try:
-                    join_status = join_subreddit(driver, label, subreddit)
+                    join_status = join_if_allowed(driver, label, stats, subreddit)
                     if join_status == "joined":
                         stats.joined.append(subreddit)
                     elif join_status == "already_joined":
                         stats.already_member.append(subreddit)
-                    else:
+                    elif join_status != "skipped":
                         stats.join_failed.append(subreddit)
                     policy = decide_join_policy(stats, subreddit, join_status, rules)
                 except Exception as exc:

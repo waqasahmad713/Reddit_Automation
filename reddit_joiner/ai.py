@@ -187,52 +187,130 @@ def is_commentable_intent(intent: str) -> bool:
     return str(intent or "").strip().lower() in COMMENTABLE_INTENTS
 
 
+_HUMAN_VOICES = (
+    (
+        "casual",
+        "Sound like a person typing a quick reply. Contractions. A little uneven. Not polished.",
+    ),
+    (
+        "curious",
+        "Sound curious. Share one short thought, then ask something you actually want to know about their situation.",
+    ),
+    (
+        "plain",
+        "Sound plain and direct. No warm filler and no extra friendliness.",
+    ),
+    (
+        "careful",
+        "Sound a bit unsure. Say what you would try and admit you might be wrong.",
+    ),
+    (
+        "direct",
+        "Give one clear suggestion. No greeting and no sign off.",
+    ),
+    (
+        "chatty",
+        "Sound like you just saw this while scrolling. One personal angle, then the point.",
+    ),
+)
+_LAST_HUMAN_VOICE = ""
+
+
+def _next_human_voice() -> Tuple[str, str]:
+    """Pick a different human voice from the last comment."""
+    global _LAST_HUMAN_VOICE
+    names = [name for name, _line in _HUMAN_VOICES if name != _LAST_HUMAN_VOICE]
+    name = random.choice(names or [item[0] for item in _HUMAN_VOICES])
+    _LAST_HUMAN_VOICE = name
+    line = dict(_HUMAN_VOICES)[name]
+    return name, line
+
+
+_COMMENT_CHAR_FIX = str.maketrans(
+    {
+        "-": " ",
+        ",": " ",
+        '"': "",
+        ";": " ",
+        ":": " ",
+        "_": " ",
+        "*": "",
+        "!": "",
+        "$": "",
+        "%": "",
+        "–": " ",
+        "—": " ",
+        "“": "",
+        "”": "",
+    }
+)
+
+
+def _strip_comment_chars(text: str) -> str:
+    """Drop the marks that make a comment look copied or formatted."""
+    value = (text or "").translate(_COMMENT_CHAR_FIX)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def local_comment_for_post(analysis: Dict[str, object]) -> str:
-    """Fallback comment that answers this post, not a canned one-liner."""
+    """Fallback comment that answers this post in a rotating human voice."""
     title = re.sub(r"\s+", " ", str(analysis.get("title") or "")).strip()
     words = title.split()
     detail = " ".join(words[:8]).strip(" ?.!")
     if len(detail) > 60:
-        detail = detail[:57].rstrip() + "..."
+        detail = detail[:57].rstrip()
     if len(detail) < 8:
         detail = str(analysis.get("topic") or "what you described").strip()
     intent = str(analysis.get("intent") or "other")
+    voice, _line = _next_human_voice()
     if intent == "help":
-        options = [
-            f"The {detail} part is the one I'd deal with first. What's the main thing you've already tried?",
-            f"I've been stuck on something like {detail} too. One small change is usually enough to see if you're on the right track.",
-            f"For {detail}, I'd start with the simplest fix and only change one thing. Happy to narrow it if you say what failed.",
-        ]
+        options = {
+            "casual": f"I'd poke at {detail} first. What have you already tried?",
+            "curious": f"With {detail} what is the one thing that already failed for you?",
+            "plain": f"Start with one small change on {detail} and see if it moves.",
+            "careful": f"I might be wrong but I would only change one thing around {detail} first.",
+            "direct": f"Deal with {detail} before anything else.",
+            "chatty": f"I got stuck on something like {detail} last month. The small fix was the one that stuck.",
+        }
     elif intent == "suggestion":
-        options = [
-            f"If I were choosing for {detail}, I'd take the option you can undo easily and live with it for a week.",
-            f"On {detail}, the lower-commitment option is the one I'd try first. Which limit matters more for you, time or money?",
-            f"For {detail} I'd skip the fancy version until you know you'll actually use it. What are you leaning toward?",
-        ]
+        options = {
+            "casual": f"For {detail} I would take the easy option and live with it for a week.",
+            "curious": f"On {detail} is time or money the tighter limit for you?",
+            "plain": f"Pick the {detail} option you can undo. Skip the fancy one until you know you will use it.",
+            "careful": f"Not sure I would go big on {detail}. The smaller choice is easier to walk back.",
+            "direct": f"Take the simpler {detail} option first.",
+            "chatty": f"When I had to choose on {detail} I went with whatever I could cancel. Worked out fine.",
+        }
     elif intent == "review":
-        options = [
-            f"The bit about {detail} is what I'd want more of. Was there one thing that was better or worse than you expected?",
-            f"Useful write-up on {detail}. Would you pick it again, or is there something you'd change?",
-            f"The everyday detail on {detail} is the useful part. How long have you actually been using it?",
-        ]
+        options = {
+            "casual": f"The {detail} part is the bit I wanted more of. Would you buy it again?",
+            "curious": f"On {detail} what surprised you once you actually used it?",
+            "plain": f"The useful part of this is the everyday detail on {detail}.",
+            "careful": f"Hard to tell from one take but {detail} sounds like the thing that mattered.",
+            "direct": f"Would you pick {detail} again knowing what you know now?",
+            "chatty": f"I always read these for the boring {detail} details. How long have you had it?",
+        }
     elif intent == "question":
-        options = [
-            f"On {detail}, I'd start from what you already have and only add something if it clearly fills a gap. What's the must-have for you?",
-            f"Short version for {detail}: keep it simple and compare with someone in the same spot. What constraint is blocking you?",
-            f"For {detail} the answer usually depends on budget versus how much hassle you'll tolerate. Which one is tighter?",
-        ]
+        options = {
+            "casual": f"For {detail} I would use what you already have and only add something if there is a real gap.",
+            "curious": f"On {detail} what is the must have for you?",
+            "plain": f"The short answer on {detail} depends on whether time or money is tighter.",
+            "careful": f"I do not have a perfect answer on {detail}. I would start small and compare notes.",
+            "direct": f"Look at what you already have for {detail} before adding anything new.",
+            "chatty": f"I asked something close to {detail} a while back. The useful replies all started from the budget.",
+        }
     else:
-        options = [
-            f"The {detail} part is what I actually wanted to reply to. Curious how that played out for you.",
-        ]
-    return _clean_comment(random.choice(options))
+        options = {
+            voice: f"The {detail} part is what I actually wanted to reply to.",
+        }
+    return _clean_comment(options.get(voice) or next(iter(options.values())))
 
 
 def _clean_comment(text: str) -> str:
     value = _strip_think(text or "").strip().strip('"').strip("'")
     value = _strip_fences(value)
     value = re.sub(r"(?is)^(?:sure|okay|ok|here(?:'s| is)|comment:)\s*[:\-]*\s*", "", value)
-    value = re.sub(r"\s+", " ", value)
+    value = _strip_comment_chars(value)
     parts = re.split(r"(?<=[.!?])\s+", value)
     if len(parts) > 2:
         value = " ".join(parts[:2]).strip()
@@ -828,17 +906,7 @@ def generate_ai_comment(
             "post is not help, suggestion, review, or question"
         )
     place = f"r/{subreddit.strip()}" if (subreddit or "").strip() else "this Reddit community"
-    style = (tone or "friendly").strip().lower()
-    if style == "funny":
-        style = "friendly"
-    if mood == "negative":
-        style = "neutral"
-    tone_line = {
-        "expert": "Sound like a knowledgeable hobbyist: specific and humble, not lecturing.",
-        "funny": "Light dry humor is ok. No memes, no sarcasm that could look mean.",
-        "neutral": "Keep it plain and concise.",
-        "friendly": "Be warm and conversational, like a regular on the sub.",
-    }.get(style, "Be warm and conversational, like a regular on the sub.")
+    voice, tone_line = _next_human_voice()
     mood_line = {
         "negative": "The post is frustrated or unhappy. Be careful and empathetic. Do not cheerlead or say the post is great.",
         "positive": "The post is upbeat. You can agree, but still mention something specific.",
@@ -869,13 +937,13 @@ def generate_ai_comment(
         else ""
     )
     prompt = (
-        f"Write one Reddit comment (1-2 sentences) for {place}. "
+        f"Write one Reddit comment (1-2 sentences) for {place}. Voice this time: {voice}. "
         f"{tone_line} {mood_line} {intent_line}{rule_line} "
-        "Write the way a person types on their phone: contractions, a little uneven, no essay. "
-        "Use a real detail from the title or body (a product, place, problem, or choice). "
+        "Write the way a person talks, in this voice only. Do not reuse a stock friendly opener. "
+        "Use a real detail from the title or body. "
         "Do not say great post, thanks for sharing, nice write-up, or hope this helps. "
-        "Do not list keywords. Do not start with Yeah, Absolutely, or Nice take. "
-        "No hashtags, no quotes around the whole comment, no username, no asking for upvotes.\n\n"
+        "Do not use these characters anywhere: - , \" ; : _ * ! $ % "
+        "No hashtags, no username, no asking for upvotes.\n\n"
         f"Title: {title}\n\n{(body or '')[:1200]}"
     )
     system = (
@@ -900,12 +968,14 @@ def generate_ai_comment(
         # a reasoning dump reaches Reddit. Salvage the first sentences instead,
         # and hold them to the same checks.
         loose = _strip_fences(_strip_think(text or "")).strip().strip('"')
-        loose = " ".join(re.split(r"(?<=[.!?])\s+", loose)[:2])[:280].strip()
+        loose = _strip_comment_chars(
+            " ".join(re.split(r"(?<=[.!?])\s+", loose)[:2])[:280]
+        )
         if len(re.findall(r"[A-Za-z]", loose)) >= 18 and not looks_like_automation(loose):
             cleaned = loose
     if not cleaned:
         raise RuntimeError("AI comment was empty or looked automated")
-    return cleaned, provider
+    return cleaned, f"{provider}/{voice}"
 
 
 def generate_ai_post(

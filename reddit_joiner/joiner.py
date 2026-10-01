@@ -272,6 +272,20 @@ EXPLORE_SHARE = 0.30  # about 30% of communities this sitting are exploration
 EXPLORE_SKIP_SESSIONS = 1
 EXPLORE_MEMORY = 12  # how many explore sittings to remember per account
 EXPLORE_RANDOM_TRIES = 6  # unused; communities come from search or the live feed
+JOIN_ARRIVE_WAYS = (
+    "activity",
+    "search",
+    "suggestions",
+    "related",
+    "listing",
+)
+_JOIN_ARRIVE_LABELS = {
+    "activity": "a community already on the screen",
+    "search": "keyword search",
+    "suggestions": "search suggestions",
+    "related": "related communities",
+    "listing": "Popular / All / Rising",
+}
 
 ACTIVITY_ON_HOMEPAGE = 12  # unused; home time comes from HOME_ACTIVITY_SHARE
 ACTIVITY_ON_SUBREDDIT = (12, 28)  # quick look inside a community, then back to Home
@@ -304,10 +318,13 @@ COMMENTABLE_POST_INTENTS = {"help", "suggestion", "review", "question"}
 # Searching from Home, then reading the results on the "New" tab. Counts as Home
 # time, since the search bar and the results page both live outside a community.
 SEARCH_ON_NEW_CHANCE = 0.7
-SEARCHES_PER_SESSION = (0, 3)
-SEARCH_RESULT_DWELL = (20.0, 45.0)
-SEARCH_OPEN_RESULT_CHANCE = 0.5
-SEARCH_MIN_REMAINING = 45.0  # general comments only on new posts
+SEARCHES_PER_SESSION = (0, 1)  # at most one short search this sitting
+SEARCH_QUERY_MEMORY = 50  # per-account search sentences we refuse to type again
+SEARCH_RESULT_DWELL = (5.0, 11.0)  # glance at results, do not sit on them
+SEARCH_OPEN_RESULT_CHANCE = 0.12
+SEARCH_MIN_REMAINING = 16.0  # skip search when the sitting is almost over
+SEARCH_QUERY_MAX_WORDS = 4
+SEARCH_QUERY_MAX_CHARS = 36
 COMMUNITY_POST_CHANCE = 0.18  # open fewer posts in a short sitting
 
 # Smooth wheel scrolling: small ticks, uneven gaps, light rebound.
@@ -438,11 +455,11 @@ MAX_RETRY_ACCOUNTS = 1
 # Deep Q-Network for subreddit choice and comment/skip. Never crashes the bot.
 RL_ENABLED = True
 RL_MODEL_FILE = str(_RL_MODEL_FILE)
-# A steady 30% of actions stay exploratory. The floor equals the start, so a
-# model loaded from disk is pulled to 30% rather than keeping an older rate.
-RL_EPSILON_INIT = 0.30
-RL_EPSILON_MIN = 0.30
-RL_EPSILON_DECAY = 1.0
+# Thin exploration only. 30% random comment/lurk choices were capping success
+# near 50%. UCB plus softmax still try under-used tones without coin-flips.
+RL_EPSILON_INIT = 0.10
+RL_EPSILON_MIN = 0.06
+RL_EPSILON_DECAY = 0.992
 RL_LEARNING_RATE = 0.1
 RL_DQN_LR = 0.001
 RL_DISCOUNT_FACTOR = 0.9
@@ -486,7 +503,7 @@ DELAY_BETWEEN_PROFILES = (10.0, 42.0)
 
 # Open every account and run browse/comment/post at the same time.
 PARALLEL_PROFILES = True
-MAX_PARALLEL_PROFILES = 4  # how many Chrome profiles run at once (rest wait in queue)
+MAX_PARALLEL_PROFILES = 8  # how many Chrome profiles run at once (rest wait in queue)
 PARALLEL_START_STAGGER = (7.0, 28.0)  # seconds between launching each Chrome
 
 # Each account gets its own sitting length and start time this run.
@@ -618,6 +635,9 @@ class SessionStyle:
                 "→".join(self.listing_sorts),
                 self.leftover_mode,
                 f"u{int(self.upvote_chance * 100)}c{int(self.click_post_chance * 100)}",
+                f"tp{int(self.type_char[0] * 200)}",
+                f"br{int(self.break_chance * 50)}",
+                f"hv{int(self.hover_chance * 40)}",
                 names,
             )
         )
@@ -627,7 +647,9 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
     """Fresh timing and browse mix for this account sitting."""
     rng = _rng()
     seed = human.session_seed() or secrets.randbits(64)
-    persona = rng.choice(("slow lurker", "curious", "restless", "steady"))
+    persona = rng.choice(
+        ("slow lurker", "curious", "restless", "steady", "skimmer", "methodical")
+    )
     session_seconds = rng.uniform(*SESSION_SECONDS_RANGE)
     post_fraction = rng.uniform(*POST_IN_SESSION_RANGE)
     listing_sorts = ("new",)
@@ -680,6 +702,29 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         dwell = _shift_pair(
             rng, ACTIVITY_ON_SUBREDDIT, 0.7, 1.0, min_lo=MIN_SUBREDDIT_DWELL
         )
+    elif persona == "skimmer":
+        click *= 1.35
+        hover *= 0.7
+        comment *= 0.85
+        opened_up = 0.32
+        read = _shift_pair(rng, READ_PAUSE, 0.45, 0.8, min_lo=0.6)
+        long_read = _shift_pair(rng, LONG_READ_PAUSE, 0.45, 0.8, min_lo=1.6)
+        dwell = _shift_pair(
+            rng, ACTIVITY_ON_SUBREDDIT, 0.55, 0.9, min_lo=MIN_SUBREDDIT_DWELL
+        )
+        brk *= 0.75
+    elif persona == "methodical":
+        click *= 0.7
+        hover *= 1.55
+        comment *= 0.95
+        opened_up = 0.38
+        read = _shift_pair(rng, READ_PAUSE, 1.15, 1.55, min_lo=1.4)
+        long_read = _shift_pair(rng, LONG_READ_PAUSE, 1.1, 1.5, min_lo=3.2)
+        thread = _shift_pair(rng, THREAD_READ, 1.05, 1.2, min_lo=4.2)
+        dwell = _shift_pair(
+            rng, ACTIVITY_ON_SUBREDDIT, 1.05, 1.25, min_lo=MIN_SUBREDDIT_DWELL
+        )
+        brk *= 1.15
     else:
         dwell = _shift_pair(
             rng, ACTIVITY_ON_SUBREDDIT, 0.85, 1.15, min_lo=MIN_SUBREDDIT_DWELL
@@ -689,13 +734,19 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         thread = _shift_pair(rng, THREAD_READ, 0.95, 1.05, min_lo=4.0)
     down, up, wander = 0.58, 0.16, 0.08
     mix = rng.random()
-    if mix < 0.34:
+    if mix < 0.28:
         down, up, wander = 0.70, 0.10, 0.06
-    elif mix < 0.62:
+    elif mix < 0.52:
         down, up, wander = 0.46, 0.22, 0.14
-    elif mix < 0.80:
+    elif mix < 0.72:
         down, up, wander = 0.52, 0.12, 0.18
-    leftover_mode = rng.choice(("even", "weighted", "one_long"))
+    else:
+        down, up, wander = (
+            rng.uniform(0.40, 0.72),
+            rng.uniform(0.08, 0.26),
+            rng.uniform(0.05, 0.20),
+        )
+    leftover_mode = rng.choice(("even", "weighted", "one_long", "front_loaded"))
     home_share = rng.uniform(*HOME_ACTIVITY_SHARE_RANGE)
     community_share = rng.uniform(*MAX_COMMUNITY_SHARE_RANGE)
     community_share = min(community_share, max(0.12, 0.92 - home_share))
@@ -713,9 +764,9 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         scroll_down=down,
         scroll_up=up,
         wander=wander,
-        pulse_every=rng.uniform(12.0, 28.0),
-        profile_gap=rng.uniform(45.0, 120.0),
-        between_break_chance=rng.uniform(0.18, 0.45),
+        pulse_every=rng.uniform(8.0, 34.0),
+        profile_gap=rng.uniform(32.0, 140.0),
+        between_break_chance=rng.uniform(0.12, 0.52),
         subreddit_dwell=dwell,
         home_before=_shift_pair(rng, HOME_ACTIVITY_BEFORE_JOIN, 0.92, 1.08, min_lo=60.0),
         home_between=_shift_pair(rng, HOME_BETWEEN_SUBS, 0.85, 1.2, min_lo=MIN_HOME_HOP),
@@ -803,6 +854,10 @@ def remember_session_pattern(user_id: str, fingerprint: str) -> None:
         pass
 
 
+_batch_style_lock = threading.Lock()
+_batch_style_fps: set = set()
+
+
 def unique_session_plan(
     user_id: str,
     label: str,
@@ -825,17 +880,29 @@ def unique_session_plan(
         style.home_first_seconds = _rng().uniform(*style.home_before)
         return style
 
-    for _ in range(28):
+    def _claim(fingerprint: str) -> bool:
+        with _batch_style_lock:
+            if fingerprint in _batch_style_fps:
+                return False
+            _batch_style_fps.add(fingerprint)
+            return True
+
+    for _ in range(40):
         style = _apply(roll_session_style(user_id, label))
         subs = pick_session_subreddits(user_id, karma, age_days)
         fingerprint = style.fingerprint(subs)
-        if not pattern_already_used(user_id, fingerprint):
-            remember_session_pattern(user_id, fingerprint)
-            return style, subs, fingerprint
-        last_style, last_subs, last_fp = style, subs, fingerprint
+        if pattern_already_used(user_id, fingerprint):
+            last_style, last_subs, last_fp = style, subs, fingerprint
+            continue
+        if not _claim(fingerprint):
+            last_style, last_subs, last_fp = style, subs, fingerprint
+            continue
+        remember_session_pattern(user_id, fingerprint)
+        return style, subs, fingerprint
     last_style = _apply(last_style)
     last_style.leftover_mode = f"{last_style.leftover_mode}-{secrets.token_hex(2)}"
     last_fp = last_style.fingerprint(last_subs)
+    _claim(last_fp)
     remember_session_pattern(user_id, last_fp)
     return last_style, last_subs, last_fp
 
@@ -970,11 +1037,22 @@ def visit_sheet_post_community(
     if not name:
         return 0.0
     started = time.time()
-    url = community_entry_url(name)
-    log(f"[Profile {label}] {reason} — r/{name} via {url}")
+    way = pick_join_arrive_way(stats, preferred=(stats.explore_how or {}).get(name.lower(), ""))
+    log(f"[Profile {label}] {reason} — r/{name}")
     raise_profile_browser(label)
-    if not open_exclusive_community(driver, label, user_id, name, url):
+    opened, used_way = open_community_for_join(
+        driver, label, user_id, name, how=way
+    )
+    if not opened:
         return 0.0
+    try:
+        url = driver.current_url or community_entry_url(name)
+    except Exception:
+        url = community_entry_url(name)
+    log(
+        f"[Profile {label}] r/{name} opened via "
+        f"{_JOIN_ARRIVE_LABELS.get(used_way, used_way)}"
+    )
     time.sleep(_rng().uniform(1.1, 2.8))
     dismiss_popups(driver)
     try:
@@ -1210,6 +1288,48 @@ if (!names.length) {
 return names.slice(0, 20);
 """
 
+_FIND_SUB_LINK_JS = r"""
+const want = String(arguments[0] || '').toLowerCase();
+function walk(root, fn) {
+  fn(root);
+  let nodes;
+  try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+  nodes.forEach(el => { if (el.shadowRoot) walk(el.shadowRoot, fn); });
+}
+function visible(el) {
+  try {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < (window.innerHeight + 40)
+      && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.05;
+  } catch (e) { return false; }
+}
+let best = null;
+let bestScore = -1;
+walk(document, root => {
+  let nodes = [];
+  try { nodes = root.querySelectorAll('a[href*="/r/"], button, [role="option"], [role="link"]'); } catch (e) { return; }
+  nodes.forEach(el => {
+    if (!visible(el)) return;
+    const href = ((el.getAttribute && el.getAttribute('href')) || '').toLowerCase();
+    const label = (
+      href + ' ' +
+      ((el.innerText || el.textContent || '')) + ' ' +
+      ((el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '')
+    ).toLowerCase();
+    const m = href.match(/\/r\/([a-z0-9_]+)/i) || label.match(/(?:^|\s)r\/([a-z0-9_]+)/i);
+    if (!m || m[1] !== want) return;
+    if (href.includes('/user/') || href.includes('/u/')) return;
+    const r = el.getBoundingClientRect();
+    let score = Math.min(r.width, 260) + Math.min(r.height, 90);
+    if (href && !href.includes('/comments/') && !href.includes('/post/')) score += 80;
+    if (label.includes('r/' + want)) score += 25;
+    if (score > bestScore) { bestScore = score; best = el; }
+  });
+});
+return best;
+"""
+
 
 def _explore_pool(karma: int = 0, age_days: float = 0.0) -> List[str]:
     try:
@@ -1256,6 +1376,38 @@ def collect_feed_subreddits(driver: WebDriver) -> List[str]:
     return found
 
 
+def _on_community_page(driver: WebDriver, subreddit: str) -> bool:
+    key = normalize_subreddit(subreddit).lower()
+    if not key:
+        return False
+    try:
+        href = (driver.current_url or "").lower()
+    except Exception:
+        href = ""
+    return bool(re.search(r"/r/" + re.escape(key) + r"(?:/|$|\?|#)", href))
+
+
+def _find_community_link(driver: WebDriver, subreddit: str):
+    name = normalize_subreddit(subreddit)
+    if not name:
+        return None
+    try:
+        return driver.execute_script(_FIND_SUB_LINK_JS, name)
+    except Exception:
+        return None
+
+
+def _click_community_link(driver: WebDriver, label: str, subreddit: str) -> bool:
+    element = _find_community_link(driver, subreddit)
+    if element is None:
+        return False
+    if not human_click(driver, element):
+        return False
+    time.sleep(_rng().uniform(1.3, 2.8))
+    dismiss_popups(driver)
+    return _on_community_page(driver, subreddit)
+
+
 def discover_explore_subreddits(
     driver: WebDriver,
     label: str,
@@ -1265,7 +1417,7 @@ def discover_explore_subreddits(
     age_days: float = 0.0,
     seen: Optional[Iterable[str]] = None,
     user_id: str = "",
-) -> List[str]:
+) -> Tuple[List[str], Dict[str, str]]:
     """Find communities the way a person would, never from r/random or a fixed list.
 
     Each sitting uses a few of these: a community already on screen, a keyword
@@ -1286,14 +1438,16 @@ def discover_explore_subreddits(
     soft.discard("")
     skip = hard | soft
     found: List[str] = []
+    found_how: Dict[str, str] = {}
     seen_during_activity = collect_feed_subreddits(driver)
 
-    def _take(name: str) -> bool:
+    def _take(name: str, source: str) -> bool:
         clean = _usable_explore_name(name, skip)
         if not clean:
             return False
         found.append(clean)
         skip.add(clean.lower())
+        found_how[clean.lower()] = source
         return True
 
     # Each sitting uses a few of these. Never r/random and never a fixed name list.
@@ -1331,50 +1485,42 @@ def discover_explore_subreddits(
         for name in names:
             if added >= _room("activity") or len(found) >= need:
                 return
-            if _take(name):
+            if _take(name, "activity"):
                 added += 1
                 log(f"[Profile {label}] Saw r/{name} during activity — will join it")
 
     def _search_key() -> str:
-        try:
-            pool = _search_query_pool(None)
-        except Exception:
-            pool = []
-        phrase = pool[0] if pool else "beginner advice"
-        words = [word for word in phrase.split() if word]
-        if len(words) > 2:
-            phrase = " ".join(words[: _rng().randint(1, 2)])
-        return phrase
+        return pick_search_query(None, user_id)
 
     def _from_search() -> None:
         added = 0
         if _room("search") <= 0:
             return
         key = _search_key()
-        urls = (
-            "https://www.reddit.com/search/?q=" + quote_plus(key) + "&type=communities",
-            "https://www.reddit.com/search/?q=" + quote_plus(key) + "&type=link&sort=new",
+        if not key:
+            return
+        url = (
+            "https://www.reddit.com/search/?q="
+            + quote_plus(key)
+            + "&type=communities"
         )
         names: List[str] = []
-        for url in urls:
-            try:
-                navigate(driver, url, label)
-                time.sleep(_rng().uniform(1.8, 3.4))
-                dismiss_popups(driver)
-            except Exception as exc:
-                log(f"[Profile {label}] Community search for \"{key}\" skipped ({brief_error(exc)})")
-                continue
-            for name in collect_feed_subreddits(driver):
-                if name.lower() not in {item.lower() for item in names}:
-                    names.append(name)
-            if len(names) >= _room("search"):
-                break
+        try:
+            navigate(driver, url, label)
+            time.sleep(_rng().uniform(0.8, 1.5))
+            dismiss_popups(driver)
+        except Exception as exc:
+            log(f"[Profile {label}] Community search for \"{key}\" skipped ({brief_error(exc)})")
+            return
+        for name in collect_feed_subreddits(driver):
+            if name.lower() not in {item.lower() for item in names}:
+                names.append(name)
         _rng().shuffle(names)
         log(f"[Profile {label}] Searched communities for \"{key}\"")
         for name in names:
             if added >= _room("search") or len(found) >= need:
                 return
-            if _take(name):
+            if _take(name, "search"):
                 added += 1
                 log(f"[Profile {label}] Search for \"{key}\" found r/{name} — will join it")
 
@@ -1383,6 +1529,8 @@ def discover_explore_subreddits(
         if _room("suggestions") <= 0:
             return
         key = _search_key()
+        if not key:
+            return
         try:
             if "/search" in (driver.current_url or ""):
                 navigate(driver, REDDIT_HOME_URL, label)
@@ -1395,8 +1543,9 @@ def discover_explore_subreddits(
             log(f"[Profile {label}] Search box was not open — suggestions skipped")
             return
         try:
-            time.sleep(_rng().uniform(0.3, 0.8))
-            _type_into_focused(driver, key)
+            time.sleep(_rng().uniform(0.2, 0.5))
+            _type_into_focused(driver, key, quick=True)
+            time.sleep(_rng().uniform(0.5, 1.0))
             time.sleep(_rng().uniform(1.0, 1.8))
         except Exception as exc:
             log(f"[Profile {label}] Could not type \"{key}\" for suggestions ({brief_error(exc)})")
@@ -1411,7 +1560,7 @@ def discover_explore_subreddits(
         for name in names:
             if added >= _room("suggestions") or len(found) >= need:
                 return
-            if _take(name):
+            if _take(name, "suggestions"):
                 added += 1
                 log(f"[Profile {label}] Suggestion for \"{key}\" showed r/{name} — will join it")
 
@@ -1428,7 +1577,7 @@ def discover_explore_subreddits(
         for name in names:
             if added >= _room("related") or len(found) >= need:
                 return
-            if _take(str(name)):
+            if _take(str(name), "related"):
                 added += 1
                 log(f"[Profile {label}] Related list showed r/{name} — will join it")
 
@@ -1456,7 +1605,7 @@ def discover_explore_subreddits(
         for name in names:
             if added >= _room("listing") or len(found) >= need:
                 return
-            if _take(name):
+            if _take(name, "listing"):
                 added += 1
                 log(f"[Profile {label}] Saw r/{name} on {title} — will join it")
 
@@ -1491,9 +1640,16 @@ def discover_explore_subreddits(
                 continue
             found.append(clean)
             relaxed.add(clean.lower())
+            found_how[clean.lower()] = "activity"
             log(f"[Profile {label}] Saw r/{clean} again during activity — will join it")
 
-    return found[:need]
+    keep = found[:need]
+    how = {
+        name.lower(): found_how[name.lower()]
+        for name in keep
+        if name.lower() in found_how
+    }
+    return keep, how
 
 
 # After clicking Open, AdsPower assigns then refreshes the proxy IP.
@@ -1648,6 +1804,8 @@ class AccountSummary:
     scrolled_px: float = 0.0
     scroll_engine: str = ""
     explored: List[str] = field(default_factory=list)
+    explore_how: Dict[str, str] = field(default_factory=dict)
+    join_arrive_ways: List[str] = field(default_factory=list)
 
     def report_lines(self) -> List[str]:
         lines = [
@@ -1999,6 +2157,34 @@ def _rank_post_targets(
     return [name for _, name in scored]
 
 
+def _rl_comment_choices(rules: Any, *, force: bool) -> List[str]:
+    """Tones this community still allows. Funny/expert get dropped on strict subs."""
+    from reddit_joiner.rl import COMMENT_ACTIONS, COMMENT_TONE_ACTIONS
+    from reddit_joiner.rules import safer_tone
+
+    pool = list(COMMENT_TONE_ACTIONS if force else COMMENT_ACTIONS)
+    strict = float(getattr(rules, "strictness", 0) or 0) if rules is not None else 0.0
+    flags = (getattr(rules, "flags", None) or {}) if rules is not None else {}
+    out: List[str] = []
+    for action in pool:
+        if action.startswith("comment:"):
+            tone = action.split(":", 1)[-1]
+            try:
+                if safer_tone(rules, tone) != tone:
+                    continue
+            except Exception:
+                pass
+            if strict >= 0.4 and tone == "funny":
+                continue
+            if flags.get("account_gate") and tone in {"funny", "expert"}:
+                continue
+        out.append(action)
+    if force:
+        tones = [item for item in out if item.startswith("comment:")]
+        return tones or list(COMMENT_TONE_ACTIONS)
+    return out or pool
+
+
 def _rl_learn(
     stats: AccountSummary,
     state: Any,
@@ -2310,6 +2496,47 @@ def explored_subreddits(user_id: str, last_n: int = EXPLORE_SKIP_SESSIONS) -> se
     for names in _explored_run_names(user_id, last_n):
         found.update(name.lower() for name in names)
     return found
+
+
+_search_claim_lock = threading.Lock()
+_live_search_norms: set = set()
+
+
+def _norm_search_query(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _claim_search_query(user_id: str, query: str) -> bool:
+    """True if this sentence is free for this sitting. Blocks other accounts too."""
+    phrase = re.sub(r"\s+", " ", (query or "").strip())
+    norm = _norm_search_query(phrase)
+    if not norm or len(norm) < 6:
+        return False
+    with _FILE_LOCK:
+        data = _load_subreddit_log()
+        for entry in data.values():
+            if not isinstance(entry, dict):
+                continue
+            for old in entry.get("search_queries") or []:
+                if _norm_search_query(str(old)) == norm:
+                    return False
+        with _search_claim_lock:
+            if norm in _live_search_norms:
+                return False
+            _live_search_norms.add(norm)
+        if user_id:
+            entry = data.get(user_id) if isinstance(data.get(user_id), dict) else {}
+            used = [
+                str(item).strip()
+                for item in (entry.get("search_queries") or [])
+                if str(item).strip()
+            ]
+            if phrase not in used:
+                used.append(phrase)
+            entry["search_queries"] = used[-SEARCH_QUERY_MEMORY:]
+            data[user_id] = entry
+            _save_subreddit_log(data)
+        return True
 
 
 def remember_explored_subreddits(user_id: str, subs: List[str]) -> None:
@@ -4728,8 +4955,12 @@ walk(document, root => {
     } catch (e) {}
     const t = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-label') || ''))
       .replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t) return;
-    if (t.includes('we had a server') || t.includes('we had server')) bits.push(t.slice(0, 500));
+    if (!t || t.length > 700) return;
+    if (
+      t.includes('we had a server') || t.includes('we had server') ||
+      t.includes('has been suspended') || t.includes('has been banned') ||
+      t.includes('account is suspended') || t.includes('you have been banned')
+    ) bits.push(t.slice(0, 500));
   });
 });
 return bits.join('\n');
@@ -4755,58 +4986,240 @@ def _popup_says_server_error(text: str) -> bool:
     return "we had a server" in folded or "we had server" in folded
 
 
-def profile_icon_shows_server_error(driver: WebDriver, label: str) -> bool:
-    """Hold the cursor on the profile icon. That popup means the account is banned."""
+def _page_says_banned(driver: WebDriver) -> bool:
+    """True when the open page itself is a ban / suspend screen."""
+    try:
+        blob = str(
+            driver.execute_script(
+                "return ((document.title || '') + '\\n' + "
+                "((document.body && document.body.innerText) || '')).slice(0, 2800);"
+            )
+            or ""
+        ).lower()
+    except Exception:
+        blob = ""
+    if any(phrase in blob for phrase in _BAN_PHRASES):
+        return True
+    return _popup_says_server_error(blob)
+
+
+def _popup_says_banned(text: str) -> bool:
+    folded = re.sub(r"\s+", " ", (text or "").lower())
+    if _popup_says_server_error(folded):
+        return True
+    return any(phrase in folded for phrase in _BAN_PHRASES)
+
+
+def _dismiss_chrome_menus(driver: WebDriver) -> None:
+    try:
+        ActionChains(driver).send_keys(Keys.ESCAPE).pause(0.15).send_keys(Keys.ESCAPE).perform()
+    except Exception:
+        pass
+
+
+_ban_probe_lock = threading.Lock()
+_last_ban_probes: List[str] = []
+
+
+def _pick_ban_probes(catalog: List[str], rng: random.Random) -> List[str]:
+    """Pick 1–2 follow-up checks, and avoid reusing the exact last sitting's mix."""
+    global _last_ban_probes
+    take = 1 if rng.random() < 0.42 else 2
+    chosen = catalog[:]
+    for _ in range(10):
+        mix = catalog[:]
+        rng.shuffle(mix)
+        mix = mix[:take]
+        with _ban_probe_lock:
+            if mix != _last_ban_probes:
+                _last_ban_probes = list(mix)
+                return mix
+        chosen = mix
+    with _ban_probe_lock:
+        _last_ban_probes = list(chosen)
+    return chosen
+
+
+def _ban_probe_profile_menu(driver: WebDriver, label: str) -> bool:
+    """Avatar check with a random shape so every sitting is not the same hover."""
+    rng = _rng()
     icon = None
-    deadline = time.time() + 8.0
+    deadline = time.time() + rng.uniform(3.5, 8.0)
     while time.time() < deadline and icon is None:
         icon = _profile_icon(driver)
         if icon is None:
-            time.sleep(0.4)
+            time.sleep(rng.uniform(0.25, 0.7))
     if icon is None:
-        log(f"[Profile {label}] No profile icon on Home — ban hover skipped")
+        log(f"[Profile {label}] No profile icon — trying another ban check")
         return False
-    log(f"[Profile {label}] Holding the cursor on the profile icon")
+    style = rng.choice(("hover", "hover_click", "click", "js_hover"))
+    log(f"[Profile {label}] Ban check via profile menu ({style})")
     try:
         driver.execute_script(
-            "arguments[0].scrollIntoView({block:'center', inline:'nearest'});", icon
+            "arguments[0].scrollIntoView({block:'nearest', inline:'nearest'});", icon
         )
     except Exception:
         pass
+    time.sleep(rng.uniform(0.2, 0.7))
+    if style in {"hover", "hover_click"}:
+        try:
+            ActionChains(driver).move_to_element(icon).pause(rng.uniform(0.45, 2.1)).perform()
+        except Exception as exc:
+            log(f"[Profile {label}] Profile hover skipped ({brief_error(exc)})")
+            if style == "hover":
+                return False
+    if style == "js_hover":
+        try:
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const types = ['pointerover', 'mouseenter', 'mouseover', 'mousemove'];
+                for (const type of types) {
+                  el.dispatchEvent(new MouseEvent(type, {
+                    bubbles: true, cancelable: true, view: window
+                  }));
+                }
+                """,
+                icon,
+            )
+        except Exception:
+            pass
+        time.sleep(rng.uniform(0.7, 1.8))
+    if style in {"click", "hover_click"}:
+        try:
+            ActionChains(driver).move_to_element(icon).pause(
+                rng.uniform(0.12, 0.45)
+            ).click().perform()
+        except Exception:
+            try:
+                driver.execute_script("arguments[0].click();", icon)
+            except Exception:
+                pass
+        time.sleep(rng.uniform(0.7, 1.6))
+    elif style != "js_hover":
+        time.sleep(rng.uniform(0.6, 1.5))
+    shown = _hover_popup_text(driver)
+    banned = _popup_says_banned(shown) or _page_says_banned(driver)
+    if banned:
+        log(f"[Profile {label}] Profile menu showed a ban / server-error notice")
+    _dismiss_chrome_menus(driver)
+    return banned
+
+
+def _ban_probe_open_url(driver: WebDriver, label: str, url: str, what: str) -> bool:
+    log(f"[Profile {label}] Ban check via {what}")
     try:
-        ActionChains(driver).move_to_element(icon).pause(1.6).perform()
+        navigate(driver, url, label)
+        time.sleep(_rng().uniform(1.1, 2.8))
+        dismiss_popups(driver)
     except Exception as exc:
-        log(f"[Profile {label}] Could not move onto the profile icon ({brief_error(exc)})")
+        log(f"[Profile {label}] {what} check skipped ({brief_error(exc)})")
         return False
-    try:
-        driver.execute_script(
-            """
-            const el = arguments[0];
-            for (const type of ['mouseenter', 'mouseover', 'mousemove']) {
-              el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
-            }
-            """,
-            icon,
-        )
-    except Exception:
-        pass
-    time.sleep(1.4)
-    if _popup_says_server_error(_hover_popup_text(driver)):
-        log(f"[Profile {label}] Profile icon showed we had a server error")
+    if _page_says_banned(driver) or _popup_says_banned(_hover_popup_text(driver)):
+        log(f"[Profile {label}] {what} showed this account is banned")
         return True
-    try:
-        ActionChains(driver).move_to_element(icon).pause(0.3).click().perform()
-    except Exception:
-        pass
-    time.sleep(1.2)
-    if _popup_says_server_error(_hover_popup_text(driver)):
-        log(f"[Profile {label}] Profile icon showed we had a server error")
+    blocked = home_account_block_reason(driver, True)
+    if blocked == "account banned":
+        log(f"[Profile {label}] {what} showed this account is banned")
         return True
-    try:
-        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-    except Exception:
-        pass
     return False
+
+
+def _ban_probe_about_json(driver: WebDriver, label: str, username: str) -> bool:
+    log(f"[Profile {label}] Ban check via about.json")
+    about = reddit_session_json(
+        driver, f"https://www.reddit.com/user/{username}/about.json", label
+    )
+    about_data = about.get("data") if isinstance(about.get("data"), dict) else about
+    if _account_payload_suspended(about_data if isinstance(about_data, dict) else {}):
+        log(f"[Profile {label}] about.json says this account is suspended")
+        return True
+    return False
+
+
+def account_ban_reason(
+    driver: WebDriver,
+    label: str,
+    stats: AccountSummary,
+    info: Dict[str, Any],
+    logged_in: bool,
+) -> str:
+    """Confirm a ban with a fresh mix of checks. No sitting repeats the same path."""
+    if info.get("suspended"):
+        return "the account is banned"
+
+    rng = _rng()
+    blocked = home_account_block_reason(driver, logged_in)
+    if blocked == "account banned":
+        return "the account is banned"
+    if blocked:
+        return blocked
+
+    username = str(info.get("username") or stats.reddit_username or "").strip()
+    catalog = ["profile_menu", "notifications", "settings", "inbox"]
+    if username:
+        catalog.extend(["own_profile", "about_json"])
+    chosen = _pick_ban_probes(catalog, rng)
+    log(
+        "[Profile {0}] Ban check this sitting: home banner then {1}".format(
+            label, " then ".join(chosen)
+        )
+    )
+    left_home = False
+    for name in chosen:
+        banned = False
+        try:
+            if name == "profile_menu":
+                if left_home:
+                    try:
+                        open_reddit_home_ready(driver, label)
+                        left_home = False
+                    except Exception:
+                        pass
+                banned = _ban_probe_profile_menu(driver, label)
+            elif name == "notifications":
+                banned = _ban_probe_open_url(
+                    driver, label, "https://www.reddit.com/notifications", "notifications"
+                )
+                left_home = True
+            elif name == "settings":
+                banned = _ban_probe_open_url(
+                    driver, label, "https://www.reddit.com/settings", "settings"
+                )
+                left_home = True
+            elif name == "inbox":
+                banned = _ban_probe_open_url(
+                    driver,
+                    label,
+                    "https://www.reddit.com/message/inbox",
+                    "inbox",
+                )
+                left_home = True
+            elif name == "own_profile" and username:
+                banned = _ban_probe_open_url(
+                    driver,
+                    label,
+                    f"https://www.reddit.com/user/{username}/",
+                    "own profile",
+                )
+                left_home = True
+            elif name == "about_json" and username:
+                banned = _ban_probe_about_json(driver, label, username)
+        except Exception as exc:
+            log(f"[Profile {label}] Ban check {name} skipped ({brief_error(exc)})")
+            banned = False
+        if banned:
+            return "the account is banned"
+        time.sleep(rng.uniform(0.35, 1.4))
+    if left_home:
+        try:
+            open_reddit_home_ready(driver, label)
+        except Exception:
+            try:
+                navigate(driver, REDDIT_HOME_URL, label)
+            except Exception:
+                pass
+    return ""
 
 
 def _account_payload_suspended(data: Dict[str, Any]) -> bool:
@@ -4852,7 +5265,8 @@ def read_logged_in_account(driver: WebDriver, label: str) -> Dict[str, Any]:
     if total <= 0:
         total = link_karma + comment_karma
     suspended = _account_payload_suspended(data)
-    if name and not suspended:
+    # Sometimes skip this extra JSON so the sitting can confirm via a different page instead.
+    if name and not suspended and _rng().random() < 0.45:
         about = reddit_session_json(
             driver, f"https://www.reddit.com/user/{name}/about.json", label
         )
@@ -5310,12 +5724,26 @@ def decide_join_policy(
     strict = float(getattr(rules, "strictness", 0) or 0)
     rules_limit = bool(flags.get("account_gate")) or strict >= 0.45
     if need_comment and policy == "lurk" and not rules_limit:
-        log(
-            f"[Profile {stats.name}] RL chose lurk on r/{name} — still commenting "
-            "because this sitting still needs a general comment"
-        )
-        policy = "comment"
-        chosen = "join:comment"
+        comment_q = 0.0
+        lurk_q = 0.0
+        if agent is not None:
+            try:
+                comment_q = float(agent.get_q_value(state, "join:comment"))
+                lurk_q = float(agent.get_q_value(state, "join:lurk"))
+            except Exception:
+                comment_q = 0.0
+        if comment_q >= 0.25 and comment_q >= lurk_q:
+            log(
+                f"[Profile {stats.name}] RL chose lurk on r/{name} — still commenting "
+                "because this sitting still needs a general comment"
+            )
+            policy = "comment"
+            chosen = "join:comment"
+        else:
+            log(
+                f"[Profile {stats.name}] Keeping lurk on r/{name} — "
+                "commenting here has been getting removed"
+            )
     elif policy == "lurk" and rules_limit:
         log(
             f"[Profile {stats.name}] r/{name} rules say be careful "
@@ -6146,6 +6574,10 @@ def human_sleep(seconds: float, remaining: Optional[float] = None) -> float:
     one long pause can never push a 5–10 min sitting over its time.
     """
     nap = max(0.0, float(seconds))
+    try:
+        nap = human.scale_delay(nap)
+    except Exception:
+        pass
     if remaining is not None:
         nap = min(nap, max(0.0, float(remaining)))
     left = deadline_remaining()
@@ -6848,43 +7280,152 @@ for (const el of items) {
 return 'no-tab';
 """
 
-_SEARCH_FALLBACK_QUERIES = (
-    "best budget headphones",
-    "how to fix a slow laptop",
-    "weekend trip ideas",
-    "cheap meal prep ideas",
-    "is it worth upgrading",
-    "beginner running tips",
-    "how do you stay motivated",
-    "what should i watch next",
-    "small flat storage ideas",
-    "first car advice",
+_SEARCH_TOPICS = (
+    "fixing a slow laptop",
+    "cooking cheap meals",
+    "buying a first car",
+    "living in a small flat",
+    "picking budget headphones",
+    "planning a weekend trip",
+    "staying motivated",
+    "preparing for job interviews",
+    "saving money each month",
+    "working from home",
+    "sleeping through the night",
+    "learning to cook",
+    "buying a used car",
+    "dealing with noisy neighbours",
+    "living on a student budget",
+    "working out at home",
+    "repairing a broken phone",
+    "moving to a new place",
+    "starting a new job",
+    "running with sore knees",
+    "taking online classes",
+    "booking a cheap holiday",
+    "getting a first pet",
+    "keeping a messy room tidy",
+    "speaking in public",
+    "paying off a credit card",
+    "cutting grocery bills",
+    "building a morning routine",
+    "finding second hand furniture",
+    "spending a rainy weekend",
+    "surviving a long commute",
+    "handling group chats",
+    "doing video interviews",
+    "going on cheap dates",
+    "keeping house plants alive",
+    "dealing with dry winter skin",
+    "using leftover food",
+    "focusing in a noisy office",
+    "renting a first flat",
+    "making friends as an adult",
+)
+_SEARCH_TEMPLATES = (
+    "how do you deal with {t}",
+    "anyone else struggling with {t}",
+    "honest advice on {t}",
+    "what should i know about {t}",
+    "why is {t} so hard",
+    "tips that actually help with {t}",
+    "what would you do about {t}",
+    "is there a simpler way of {t}",
+    "mistakes people make with {t}",
+    "does anyone have a realistic take on {t}",
+    "where do you even start with {t}",
+    "has {t} gotten harder lately",
+)
+_SEARCH_TAILS = (
+    "today",
+    "this week",
+    "right now",
+    "for me",
+    "in real life",
+    "on a quiet night",
+    "without overthinking it",
 )
 
 
-def _search_query_pool(stats: Optional[AccountSummary]) -> List[str]:
-    """Queries that look like this account's own interests, not random noise."""
+def _search_phrase_bank() -> List[str]:
+    phrases: List[str] = []
+    seen = set()
+    for topic in _SEARCH_TOPICS:
+        for tmpl in _SEARCH_TEMPLATES:
+            phrase = tmpl.format(t=topic)
+            norm = _norm_search_query(phrase)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            phrases.append(phrase)
+    return phrases
+
+
+def _title_search_phrases(stats: Optional[AccountSummary]) -> List[str]:
     queries: List[str] = []
     topics: Dict[str, Any] = getattr(stats, "subreddit_topics", {}) or {}
+    rng = _rng()
     for titles in topics.values():
         for title in titles or []:
             words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", str(title or ""))
             if len(words) < 2:
                 continue
-            take = words[: _rng().randint(2, 4)]
+            take = words[: rng.randint(2, min(4, len(words)))]
             phrase = " ".join(word.lower() for word in take)
-            if 6 <= len(phrase) <= 60:
+            if 6 <= len(phrase) <= SEARCH_QUERY_MAX_CHARS:
                 queries.append(phrase)
-    _rng().shuffle(queries)
-    queries.extend(_rng().sample(_SEARCH_FALLBACK_QUERIES, 4))
+    return queries
+
+
+def _search_query_pool(stats: Optional[AccountSummary]) -> List[str]:
+    """Unique candidate sentences for this sitting — never a shared 10-line list."""
+    queries = _title_search_phrases(stats)
+    queries.extend(_search_phrase_bank())
+    rng = _rng()
+    rng.shuffle(queries)
     seen = set()
     out: List[str] = []
     for phrase in queries:
-        if phrase in seen:
+        norm = _norm_search_query(phrase)
+        if not norm or norm in seen:
             continue
-        seen.add(phrase)
+        seen.add(norm)
         out.append(phrase)
     return out
+
+
+def _short_search_phrase(phrase: str) -> str:
+    """Keep search queries short so typing them does not eat the sitting."""
+    words = [word for word in re.findall(r"[A-Za-z][A-Za-z'-]*", phrase or "") if word]
+    if not words:
+        return re.sub(r"\s+", " ", (phrase or "").strip())[:SEARCH_QUERY_MAX_CHARS]
+    take = min(len(words), _rng().randint(2, SEARCH_QUERY_MAX_WORDS))
+    return " ".join(words[:take]).lower()[:SEARCH_QUERY_MAX_CHARS]
+
+
+def pick_search_query(
+    stats: Optional[AccountSummary],
+    user_id: str,
+    avoid: Optional[Iterable[str]] = None,
+) -> str:
+    """One short search this account has not typed, and no other account has either."""
+    blocked = {_norm_search_query(item) for item in (avoid or []) if item}
+    pool = _search_query_pool(stats)
+    rng = _rng()
+    for phrase in pool:
+        short = _short_search_phrase(phrase)
+        if _norm_search_query(short) in blocked:
+            continue
+        if _claim_search_query(user_id, short):
+            return short
+    for phrase in pool:
+        short = _short_search_phrase(phrase)
+        extra = " ".join(short.split()[:3])
+        if _norm_search_query(extra) in blocked:
+            continue
+        if _claim_search_query(user_id, extra):
+            return extra
+    return ""
 
 
 def _search_results_url(query: str) -> str:
@@ -6907,9 +7448,9 @@ def search_posts_on_new(
     typed = False
     try:
         if driver.execute_script(_SEARCH_FOCUS_JS) == "focused":
-            time.sleep(_rng().uniform(0.4, 1.1))
-            _type_into_focused(driver, query)
-            time.sleep(_rng().uniform(0.5, 1.4))
+            time.sleep(_rng().uniform(0.2, 0.5))
+            _type_into_focused(driver, query, quick=True)
+            time.sleep(_rng().uniform(0.2, 0.6))
             try:
                 ActionChains(driver).send_keys(Keys.ENTER).perform()
                 typed = True
@@ -6920,7 +7461,7 @@ def search_posts_on_new(
 
     if typed:
         log(f'{prefix}Searched "{query}" from the Home search bar')
-        time.sleep(_rng().uniform(1.6, 3.0))
+        time.sleep(_rng().uniform(0.7, 1.4))
         dismiss_popups(driver)
         sorted_new = False
         try:
@@ -6929,7 +7470,7 @@ def search_posts_on_new(
             sorted_new = False
         if sorted_new:
             log(f"{prefix}Switched the search results to the New tab")
-            time.sleep(_rng().uniform(1.4, 2.6))
+            time.sleep(_rng().uniform(0.5, 1.1))
         else:
             navigate(driver, _search_results_url(query), label)
             log(f"{prefix}Opened the New tab for these search results")
@@ -6938,19 +7479,14 @@ def search_posts_on_new(
         log(f'{prefix}Searched "{query}" and opened the New tab')
 
     dismiss_popups(driver)
-    time.sleep(_rng().uniform(1.2, 2.4))
-    results_url = driver.current_url or _search_results_url(query)
+    time.sleep(_rng().uniform(0.5, 1.0))
     spent = time.time() - started
-    dwell = min(_rng().uniform(*SEARCH_RESULT_DWELL), max(8.0, remaining - spent - 10.0))
-    log(f"{prefix}Reading {dwell:.0f}s of newest results for \"{query}\"")
-    perform_browse_activity(
-        driver,
-        dwell,
-        label,
-        user_id=getattr(stats, "user_id", "") or "",
-        stats=stats,
-        stay_url=results_url,
-    )
+    dwell = min(_rng().uniform(*SEARCH_RESULT_DWELL), max(4.0, remaining - spent - 6.0))
+    log(f"{prefix}Quick look at results for \"{query}\" ({dwell:.0f}s)")
+    try:
+        human_scroll(driver, direction=1, remaining=dwell)
+    except Exception:
+        time.sleep(max(0.0, dwell))
     return time.time() - started
 
 
@@ -6964,14 +7500,18 @@ def maybe_search_posts_on_new(
     """Search-and-read-New stretch. `how_many` is this sitting's roll. Returns Home seconds spent."""
     if int(how_many) <= 0:
         return 0.0
-    pool = _search_query_pool(stats)
-    if not pool:
-        return 0.0
+    user_id = str(getattr(stats, "user_id", "") or "")
+    sitting: List[str] = list(getattr(stats, "search_queries", None) or [])
     spent = 0.0
-    for query in pool[: max(0, int(how_many))]:
+    for _ in range(max(0, int(how_many))):
         left = remaining - spent
         if left < SEARCH_MIN_REMAINING:
             break
+        query = pick_search_query(stats, user_id, avoid=sitting)
+        if not query:
+            log(f"[Profile {label}] No unused search sentence left — skipping extra searches")
+            break
+        sitting.append(query)
         try:
             spent += search_posts_on_new(driver, label, stats, query, left)
         except Exception as exc:
@@ -6984,7 +7524,7 @@ def maybe_search_posts_on_new(
         if stats is not None:
             stats.searches += 1
             stats.search_queries.append(query)
-        time.sleep(_rng().uniform(1.0, 2.5))
+        time.sleep(_rng().uniform(0.35, 0.9))
     if spent > 0:
         try:
             return_to_reddit_home(driver, label, reason="after searching")
@@ -7147,7 +7687,7 @@ def _type_like_human(element: Any, text: str) -> None:
             time.sleep(_rng().uniform(0.04, 0.16))
 
 
-def _type_into_focused(driver: WebDriver, text: str) -> None:
+def _type_into_focused(driver: WebDriver, text: str, *, quick: bool = False) -> None:
     """Type into whatever is focused (works inside Reddit shadow DOM)."""
     for index, char in enumerate(text):
         typed = False
@@ -7167,6 +7707,12 @@ def _type_into_focused(driver: WebDriver, text: str) -> None:
                 driver.execute_cdp_cmd("Input.insertText", {"text": char})
             except Exception:
                 continue
+        if quick:
+            if char == " ":
+                time.sleep(_rng().uniform(0.03, 0.08))
+            else:
+                time.sleep(_rng().uniform(0.012, 0.04))
+            continue
         if char in ".,!?":
             time.sleep(_rng().uniform(0.22, 0.70))
         elif char == " ":
@@ -7183,6 +7729,237 @@ def _type_into_focused(driver: WebDriver, text: str) -> None:
                 time.sleep(_rng().uniform(0.06, 0.16))
             except Exception:
                 pass
+
+
+_last_join_arrive_lock = threading.Lock()
+_last_join_arrive_way = ""
+
+
+def pick_join_arrive_way(stats: Optional[AccountSummary], preferred: str = "") -> str:
+    """Pick how this sitting arrives at a community. Avoids the last way used."""
+    global _last_join_arrive_way
+    rng = _rng()
+    used = [str(item) for item in (getattr(stats, "join_arrive_ways", None) or [])]
+    last = used[-1] if used else ""
+    catalog = [way for way in JOIN_ARRIVE_WAYS]
+    rng.shuffle(catalog)
+    choice = ""
+    with _last_join_arrive_lock:
+        banned = {item for item in (last, _last_join_arrive_way) if item}
+        if preferred in JOIN_ARRIVE_WAYS:
+            choice = preferred
+        else:
+            for way in catalog:
+                if way not in banned:
+                    choice = way
+                    break
+            if not choice:
+                choice = catalog[0]
+        _last_join_arrive_way = choice
+    if stats is not None:
+        stats.join_arrive_ways.append(choice)
+    return choice
+
+
+def _arrive_via_activity(driver: WebDriver, label: str, name: str) -> bool:
+    if not _on_reddit_home(driver):
+        return_to_reddit_home(driver, label, reason="look on Home for a community")
+        time.sleep(_rng().uniform(0.8, 1.8))
+        dismiss_popups(driver)
+    for _ in range(4):
+        if _click_community_link(driver, label, name):
+            return True
+        try:
+            human_scroll(driver, direction=1, remaining=_rng().uniform(3.0, 6.5))
+        except Exception:
+            try:
+                driver.execute_script(
+                    "window.scrollBy(0, arguments[0]);", _rng().randint(380, 920)
+                )
+            except Exception:
+                break
+        time.sleep(_rng().uniform(0.7, 1.5))
+        dismiss_popups(driver)
+    return False
+
+
+def _arrive_via_search(driver: WebDriver, label: str, name: str) -> bool:
+    rng = _rng()
+    query = rng.choice((name, f"r/{name}", f"{name} community"))
+    communities = rng.random() < 0.62
+    results = (
+        "https://www.reddit.com/search/?q="
+        + quote_plus(query)
+        + ("&type=communities" if communities else "&type=link&sort=new")
+    )
+    typed = False
+    try:
+        if not _on_reddit_home(driver) and "/search" not in (driver.current_url or ""):
+            return_to_reddit_home(driver, label, reason="search for a community")
+            time.sleep(rng.uniform(0.6, 1.4))
+        if driver.execute_script(_SEARCH_FOCUS_JS) == "focused":
+            time.sleep(rng.uniform(0.25, 0.7))
+            _type_into_focused(driver, query, quick=True)
+            time.sleep(rng.uniform(0.2, 0.55))
+            ActionChains(driver).send_keys(Keys.ENTER).perform()
+            typed = True
+    except Exception:
+        typed = False
+    if typed:
+        log(f'[Profile {label}] Searched "{query}" to open r/{name}')
+        time.sleep(rng.uniform(0.7, 1.4))
+        dismiss_popups(driver)
+    else:
+        navigate(driver, results, label)
+        time.sleep(rng.uniform(0.7, 1.4))
+        dismiss_popups(driver)
+    if _on_community_page(driver, name):
+        return True
+    return _click_community_link(driver, label, name)
+
+
+def _arrive_via_suggestions(driver: WebDriver, label: str, name: str) -> bool:
+    rng = _rng()
+    try:
+        if "/search" in (driver.current_url or "") or not _on_reddit_home(driver):
+            return_to_reddit_home(driver, label, reason="type a community in search")
+            time.sleep(rng.uniform(0.7, 1.6))
+        focused = driver.execute_script(_SEARCH_FOCUS_JS) == "focused"
+    except Exception as exc:
+        log(f"[Profile {label}] Search suggestions skipped ({brief_error(exc)})")
+        return False
+    if not focused:
+        return False
+    take = min(len(name), rng.randint(3, 6)) if len(name) >= 3 else len(name)
+    prefix = name[: max(2, take)]
+    try:
+        time.sleep(rng.uniform(0.15, 0.4))
+        _type_into_focused(driver, prefix, quick=True)
+        time.sleep(rng.uniform(0.45, 0.9))
+    except Exception as exc:
+        log(f"[Profile {label}] Could not type {prefix!r} ({brief_error(exc)})")
+        return False
+    log(f'[Profile {label}] Typed "{prefix}" and picked r/{name} from suggestions')
+    clicked = _click_community_link(driver, label, name)
+    try:
+        if not clicked:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+    except Exception:
+        pass
+    return clicked
+
+
+def _arrive_via_related(driver: WebDriver, label: str, name: str) -> bool:
+    try:
+        raw = driver.execute_script(_RELATED_SUB_JS) or []
+    except Exception:
+        raw = []
+    shown = {normalize_subreddit(str(item)).lower() for item in raw}
+    if name.lower() in shown and _click_community_link(driver, label, name):
+        return True
+    try:
+        navigate(driver, "https://www.reddit.com/r/popular/", label)
+        time.sleep(_rng().uniform(1.4, 2.6))
+        dismiss_popups(driver)
+    except Exception:
+        return False
+    try:
+        raw = driver.execute_script(_RELATED_SUB_JS) or []
+    except Exception:
+        raw = []
+    shown = {normalize_subreddit(str(item)).lower() for item in raw}
+    if name.lower() in shown:
+        return _click_community_link(driver, label, name)
+    return _click_community_link(driver, label, name)
+
+
+def _arrive_via_listing(driver: WebDriver, label: str, name: str) -> bool:
+    title, url = _rng().choice(
+        (
+            ("Popular", "https://www.reddit.com/r/popular/"),
+            ("All", "https://www.reddit.com/r/all/"),
+            ("Rising", "https://www.reddit.com/r/all/rising/"),
+        )
+    )
+    try:
+        navigate(driver, url, label)
+        time.sleep(_rng().uniform(1.5, 2.8))
+        dismiss_popups(driver)
+    except Exception as exc:
+        log(f"[Profile {label}] {title} feed skipped ({brief_error(exc)})")
+        return False
+    log(f"[Profile {label}] Looking for r/{name} on {title}")
+    for _ in range(3):
+        if _click_community_link(driver, label, name):
+            return True
+        try:
+            human_scroll(driver, direction=1, remaining=_rng().uniform(2.5, 5.5))
+        except Exception:
+            try:
+                driver.execute_script(
+                    "window.scrollBy(0, arguments[0]);", _rng().randint(400, 900)
+                )
+            except Exception:
+                break
+        time.sleep(_rng().uniform(0.6, 1.3))
+    return False
+
+
+def open_community_for_join(
+    driver: WebDriver,
+    label: str,
+    user_id: str,
+    subreddit: str,
+    *,
+    wait: float = SUBREDDIT_BUSY_WAIT,
+    how: str = "",
+) -> Tuple[bool, str]:
+    """Arrive at a community the way a person would, then hold it for this account."""
+    name = normalize_subreddit(subreddit)
+    if not name:
+        return False, ""
+    way = how if how in JOIN_ARRIVE_WAYS else "listing"
+    label_way = _JOIN_ARRIVE_LABELS.get(way, way)
+    if any(key != _community_key(name) for key in held_subreddits(user_id)):
+        return_to_reddit_home(
+            driver,
+            label,
+            reason="freeing the previous community for the other accounts",
+        )
+    if not claim_subreddit(name, user_id, wait=wait):
+        holder = subreddit_holder(name)
+        who = f" ({holder})" if holder else ""
+        log(
+            f"[Profile {label}] r/{name} is already open on another account{who} "
+            "— not opening it at the same time"
+        )
+        return False, way
+    log(f"[Profile {label}] Opening r/{name} via {label_way}")
+    opened = False
+    try:
+        if way == "activity":
+            opened = _arrive_via_activity(driver, label, name)
+        elif way == "search":
+            opened = _arrive_via_search(driver, label, name)
+        elif way == "suggestions":
+            opened = _arrive_via_suggestions(driver, label, name)
+        elif way == "related":
+            opened = _arrive_via_related(driver, label, name)
+        else:
+            opened = _arrive_via_listing(driver, label, name)
+    except Exception as exc:
+        log(f"[Profile {label}] {label_way} did not open r/{name} ({brief_error(exc)})")
+        opened = False
+    used = way
+    if not opened:
+        url = community_entry_url(name)
+        log(f"[Profile {label}] r/{name} was not on that path — opening {url}")
+        navigate(driver, url, label)
+        used = "url"
+        time.sleep(_rng().uniform(1.0, 2.2))
+        dismiss_popups(driver)
+    release_all_held_subreddits(user_id, keep=name)
+    return True, used
 
 
 def _replace_focused_text(driver: WebDriver, text: str) -> None:
@@ -8043,16 +8820,8 @@ def maybe_ai_comment_on_opened_post(
     if kind != "sheet" and normalize_subreddit(subreddit).lower() in {
         name.lower() for name in (stats.lurk_subs or [])
     }:
-        sheet = {item.lower() for item in allowed_subreddits()}
-        still_need = int(stats.comments or 0) < int(stats.session_comment_target or 0)
-        if still_need and normalize_subreddit(subreddit).lower() in sheet:
-            log(
-                f"{prefix}RL marked r/{subreddit} lurk — still commenting "
-                "because this sitting still needs a general comment"
-            )
-        else:
-            log(f"{prefix}Comment skipped — RL chose lurk in r/{subreddit} after the rules")
-            return False
+        log(f"{prefix}Comment skipped — RL chose lurk in r/{subreddit} after the rules")
+        return False
     if not title:
         log(f"{prefix}Comment skipped — could not read the post title")
         return False
@@ -8154,9 +8923,9 @@ def maybe_ai_comment_on_opened_post(
     agent = _rl_agent()
     if agent is not None and RL_ENABLED:
         try:
-            from reddit_joiner.rl import COMMENT_ACTIONS, COMMENT_TONE_ACTIONS, parse_comment_action
+            from reddit_joiner.rl import parse_comment_action
 
-            choices = COMMENT_TONE_ACTIONS if force else COMMENT_ACTIONS
+            choices = _rl_comment_choices(rules, force=force)
             chosen = agent.choose_action(state, choices)
             action = chosen or action
             should, tone = parse_comment_action(action)
@@ -11890,15 +12659,10 @@ def process_profile(
             log(f"[Profile {label}] Account check: {who}account banned — closing")
             stats.print_report()
             return stats
-        blocked = home_account_block_reason(driver, logged_in)
+        blocked = account_ban_reason(driver, label, stats, info, logged_in)
         if blocked:
             stats.account_status = blocked
             log(f"[Profile {label}] Closing this account — {blocked}")
-            stats.print_report()
-            return stats
-        if profile_icon_shows_server_error(driver, label):
-            stats.account_status = "the account is banned"
-            log(f"[Profile {label}] Closing this account — the account is banned")
             stats.print_report()
             return stats
         if logged_in:
@@ -12094,7 +12858,7 @@ def process_profile(
             avoid_explore.update(allowed_subreddits())
             avoid_explore.update(stats.joined)
             avoid_explore.update(stats.already_member)
-            explore = discover_explore_subreddits(
+            explore, explore_how = discover_explore_subreddits(
                 driver,
                 label,
                 avoid=avoid_explore,
@@ -12107,12 +12871,16 @@ def process_profile(
             if explore:
                 remember_explored_subreddits(user_id, explore)
                 stats.explored = list(explore)
+                stats.explore_how = dict(explore_how)
                 log(
                     f"[Profile {label}] Will join {len(explore)} "
                     f"communit{'y' if len(explore) == 1 else 'ies'} "
                     f"found by search, suggestions, related communities, or a feed "
                     f"(skip next sitting): "
-                    + ", ".join(f"r/{name}" for name in explore)
+                    + ", ".join(
+                        f"r/{name} ({_JOIN_ARRIVE_LABELS.get(explore_how.get(name.lower(), ''), 'feed')})"
+                        for name in explore
+                    )
                 )
         hops = [name for name in browse_list if not is_blocked_subreddit(name)]
         seen_hops = {name.lower() for name in hops}
@@ -12294,19 +13062,23 @@ def process_profile(
             # extras inside a community cannot stretch the time spent there.
             sub_started = time.time()
             try:
-                url = community_entry_url(subreddit)
+                preferred = ""
+                if not is_sheet:
+                    preferred = (stats.explore_how or {}).get(subreddit.lower(), "")
+                way = pick_join_arrive_way(stats, preferred=preferred)
                 wait_for_free = min(
                     SUBREDDIT_BUSY_WAIT,
                     max(0.0, (session_end - time.time()) - MIN_SESSION_LEFT_FOR_SUB),
                 )
-                if not open_exclusive_community(
+                opened, used_way = open_community_for_join(
                     driver,
                     label,
                     user_id,
                     subreddit,
-                    url,
                     wait=wait_for_free,
-                ):
+                    how=way,
+                )
+                if not opened:
                     key = subreddit.lower()
                     if key not in deferred_hops:
                         deferred_hops.add(key)
@@ -12320,9 +13092,14 @@ def process_profile(
                             "still has it open"
                         )
                     continue
+                try:
+                    url = driver.current_url or community_entry_url(subreddit)
+                except Exception:
+                    url = community_entry_url(subreddit)
                 log(
                     f"[Profile {label}] Joining r/{subreddit} for "
-                    f"{'general activity' if is_sheet else 'random explore'} via {url}"
+                    f"{'general activity' if is_sheet else 'random explore'} via "
+                    f"{_JOIN_ARRIVE_LABELS.get(used_way, used_way)}"
                 )
                 dismiss_popups(driver)
                 try:
@@ -12407,16 +13184,12 @@ def process_profile(
                     and still_need > 0
                     and ((index - 1) in comment_slots or still_need >= remaining_subs)
                 )
-                if policy == "lurk" and still_need > 0 and not should_comment:
+                if policy == "lurk":
                     log(
                         f"[Profile {label}] RL chose lurk in r/{subreddit} after reading rules "
                         f"— browse only this community"
                     )
-                elif policy == "lurk" and should_comment:
-                    log(
-                        f"[Profile {label}] RL chose lurk in r/{subreddit} — still commenting "
-                        "because this sitting still needs a general comment"
-                    )
+                    should_comment = False
                 if should_comment:
                     want = 1
                     if still_need >= 2 and remaining_subs <= 1:
@@ -13016,7 +13789,8 @@ def main() -> int:
             report = agent.get_performance_report()
             log(
                 f"Deep RL saved to {os.path.basename(RL_MODEL_FILE)} — "
-                f"{report['actions']} actions | success {report['success_rate']:.0%} | "
+                f"{report['actions']} actions | success {report['success_rate']:.0%} "
+                f"on {report.get('graded_judged', 0)} graded outcomes | "
                 f"avg reward {report['average_reward']:.2f} | ε={report['epsilon']:.3f} | "
                 f"replay {report.get('replay', 0)}"
             )

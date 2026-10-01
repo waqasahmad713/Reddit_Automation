@@ -48,6 +48,9 @@ def begin_session_rng(user_id: str = "", label: str = "") -> random.Random:
     stream = random.Random(seed)
     _tls.rng = stream
     _tls.seed = seed
+    # Each sitting has its own pace so two accounts never share a timing signature.
+    _tls.tempo = 0.68 + stream.random() * 0.74
+    _tls.spread = 0.82 + stream.random() * 0.48
     return stream
 
 
@@ -65,6 +68,23 @@ def rng() -> random.Random:
 def end_session_rng() -> None:
     _tls.rng = None
     _tls.seed = 0
+    _tls.tempo = 1.0
+    _tls.spread = 1.0
+
+
+def session_tempo() -> float:
+    return float(getattr(_tls, "tempo", 1.0) or 1.0)
+
+
+def scale_delay(seconds: float) -> float:
+    """Stretch or compress one pause for this sitting, then add a little jitter."""
+    delay = max(0.0, float(seconds))
+    if delay <= 0:
+        return 0.0
+    tempo = float(getattr(_tls, "tempo", 1.0) or 1.0)
+    spread = float(getattr(_tls, "spread", 1.0) or 1.0)
+    jitter = rng().uniform(0.78, 1.24)
+    return max(0.02, delay * tempo * spread * jitter)
 
 
 def _ordered(span: Sequence[float]) -> Range:
@@ -113,11 +133,11 @@ def heavy_tailed_pause(
     if roll < skim_share:
         skim_lo = max(0.12, lo * 0.20)
         skim_hi = max(skim_lo + 0.06, lo * 0.75)
-        return rng().uniform(skim_lo, skim_hi)
+        return scale_delay(rng().uniform(skim_lo, skim_hi))
     if roll < skim_share + read_share:
-        return gaussian_between(lo, hi)
+        return scale_delay(gaussian_between(lo, hi))
     dwell_lo, dwell_hi = _ordered(dwell_range or (hi, hi * 2.2))
-    return gaussian_between(max(dwell_lo, hi), max(dwell_hi, hi * 1.2))
+    return scale_delay(gaussian_between(max(dwell_lo, hi), max(dwell_hi, hi * 1.2)))
 
 
 def reading_seconds(
@@ -131,7 +151,7 @@ def reading_seconds(
     feed, so a long self post should take meaningfully longer than a one liner.
     """
     chars = max(0, int(text_length or 0))
-    return gaussian_between(*base_range) + min(chars * per_char, extra_cap)
+    return scale_delay(gaussian_between(*base_range) + min(chars * per_char, extra_cap))
 
 
 def bezier_path(

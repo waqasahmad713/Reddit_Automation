@@ -58,8 +58,13 @@ WEIGHT_DECAY = 1e-4
 # Shrinkage strength for the count-based prior: with fewer than this many
 # observations for a (context, action) pair, the net's guess still dominates.
 PRIOR_STRENGTH = 4.0
-# Exploration bonus for rarely-tried actions (UCB). Scaled in reward units.
-UCB_BONUS = 1.5
+# Exploration bonus for rarely-tried actions (UCB). Stay small so it cannot
+# override a tone that has already been getting comments removed.
+UCB_BONUS = 0.4
+SOFTMAX_TEMP = 0.45
+# Drop an action in this context once it has a clearly bad measured mean.
+RISKY_PRIOR_N = 4
+RISKY_PRIOR_MEAN = -2.0
 # How much past experience to carry between runs, so learning is not restarted.
 REPLAY_PERSIST = 1500
 # Gradient steps taken per new observation. Scarce data is worth revisiting.
@@ -428,11 +433,11 @@ class RLAgent:
         *,
         model_file: str = DEFAULT_MODEL,
         db_path: str = DEFAULT_DB,
-        epsilon: float = 0.30,
-        # With only a few hundred graded outcomes there is not enough evidence to
-        # commit to a tone, so keep a real exploration floor.
-        epsilon_min: float = 0.30,
-        epsilon_decay: float = 0.995,
+        epsilon: float = 0.10,
+        # Real outcomes decide the floor. A 30% coin-flip among skip/funny/lurk
+        # is how comments get removed; keep a thin random slice only.
+        epsilon_min: float = 0.06,
+        epsilon_decay: float = 0.992,
         alpha: float = 0.001,
         gamma: float = 0.9,
         save_interval: int = 10,
@@ -466,6 +471,8 @@ class RLAgent:
         self.last_loss = 0.0
         self.graded_actions = 0
         self.graded_reward = 0.0
+        self.graded_success = 0
+        self.graded_fail = 0
         self.unchecked_retired = 0
         self.last_status_updates: List[Dict[str, Any]] = []
         self._handlers_installed = False
@@ -686,6 +693,10 @@ class RLAgent:
                 if graded:
                     self.graded_actions += 1
                     self.graded_reward += float(reward)
+                    if float(reward) > 0:
+                        self.graded_success += 1
+                    elif float(reward) < 0:
+                        self.graded_fail += 1
                 self.experience_buffer.append(
                     {
                         "state_key": self.get_state_key(state) if isinstance(state, dict) else str(state),
@@ -712,30 +723,70 @@ class RLAgent:
             except Exception:
                 return
 
+    def _viable_actions(self, state: Any, actions: List[str]) -> List[str]:
+        """Drop tones/actions this context has already proven are getting removed."""
+        kept: List[str] = []
+        for action in actions:
+            count, mean = self._prior_for(state, action)
+            if count >= RISKY_PRIOR_N and mean <= RISKY_PRIOR_MEAN:
+                continue
+            kept.append(action)
+        return kept or list(actions)
+
+    def _softmax_pick(self, actions: List[str], scores: List[float]) -> str:
+        temperature = max(0.18, float(SOFTMAX_TEMP) * max(0.4, float(self.epsilon) / 0.10))
+        arr = np.asarray(scores, dtype=np.float64)
+        arr = (arr - np.max(arr)) / temperature
+        arr = np.clip(arr, -20.0, 20.0)
+        weights = np.exp(arr)
+        total = float(np.sum(weights))
+        if not np.isfinite(total) or total <= 0:
+            return random.choice(actions)
+        probs = weights / total
+        index = int(self._rng.choice(len(actions), p=probs))
+        return actions[index]
+
     def choose_action(self, state: Any, possible_actions: Iterable[str]) -> Optional[str]:
         actions = [str(item) for item in possible_actions if str(item).strip()]
         if not actions:
             return None
         with self._lock:
             try:
-                if random.random() < self.epsilon:
-                    return random.choice(actions)
-                # Value plus an exploration bonus, so under-tried actions get
-                # deliberately tried instead of waiting on a random epsilon roll.
+                usable = self._viable_actions(state, actions)
                 scores = [
                     self.get_q_value(state, action)
                     + self._exploration_bonus(state, action)
-                    for action in actions
+                    for action in usable
                 ]
-                best = max(scores)
-                # Float equality almost never ties for a network, which used to
-                # make the tie-break dead code. Treat near-equal as tied.
-                tied = [
+                safe = [
                     action
-                    for action, score in zip(actions, scores)
-                    if score >= best - 1e-3
+                    for action in usable
+                    if action in {"skip", "join:lurk"} or action.startswith("skip")
                 ]
-                return random.choice(tied)
+                risky = [
+                    action
+                    for action in usable
+                    if action.startswith("comment:") or action == "join:comment"
+                ]
+                # Prefer skip/lurk when commenting in this context is expected to fail.
+                if safe and risky:
+                    best_safe = max(
+                        scores[usable.index(action)] for action in safe
+                    )
+                    best_risky = max(
+                        scores[usable.index(action)] for action in risky
+                    )
+                    if best_risky < 0.15 or best_risky < best_safe - 0.2:
+                        picked = [
+                            action
+                            for action in safe
+                            if scores[usable.index(action)] >= best_safe - 1e-3
+                        ]
+                        return random.choice(picked or safe)
+                # Thin random slice; otherwise sample in proportion to value.
+                if random.random() < (self.epsilon * 0.45):
+                    return random.choice(usable)
+                return self._softmax_pick(usable, scores)
             except Exception:
                 return random.choice(actions)
 
@@ -778,6 +829,8 @@ class RLAgent:
                 "total_fail": self.total_fail,
                 "graded_actions": self.graded_actions,
                 "graded_reward": self.graded_reward,
+                "graded_success": self.graded_success,
+                "graded_fail": self.graded_fail,
                 "unchecked_retired": self.unchecked_retired,
                 "action_stats": self.action_stats,
                 # Carry experience forward. Weights alone are not enough when
@@ -819,6 +872,8 @@ class RLAgent:
                     self.total_fail = int(payload.get("total_fail") or 0)
                     self.graded_actions = int(payload.get("graded_actions") or 0)
                     self.graded_reward = float(payload.get("graded_reward") or 0)
+                    self.graded_success = int(payload.get("graded_success") or 0)
+                    self.graded_fail = int(payload.get("graded_fail") or 0)
                     self.unchecked_retired = int(payload.get("unchecked_retired") or 0)
                     stats = payload.get("action_stats")
                     if isinstance(stats, dict):
@@ -832,6 +887,18 @@ class RLAgent:
                         for row in saved_replay:
                             if isinstance(row, dict) and row.get("action"):
                                 self.replay.append(row)
+                    if self.graded_success + self.graded_fail == 0:
+                        for row in self.replay:
+                            if not isinstance(row, dict) or not row.get("graded"):
+                                continue
+                            try:
+                                reward = float(row.get("reward") or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            if reward > 0:
+                                self.graded_success += 1
+                            elif reward < 0:
+                                self.graded_fail += 1
                     return
             self.arch_reset = True
         except Exception:
@@ -1146,17 +1213,24 @@ class RLAgent:
 
     def get_performance_report(self) -> Dict[str, Any]:
         avg = (self.total_reward / self.action_count) if self.action_count else 0.0
-        rate = (self.total_success / self.action_count) if self.action_count else 0.0
+        judged = int(self.graded_success) + int(self.graded_fail)
+        if judged <= 0:
+            judged = int(self.total_success) + int(self.total_fail)
+            wins = int(self.total_success)
+        else:
+            wins = int(self.graded_success)
+        rate = (wins / judged) if judged else 0.0
         graded_avg = (
             (self.graded_reward / self.graded_actions) if self.graded_actions else 0.0
         )
         return {
             "kind": self.kind,
             "actions": self.action_count,
-            "success": self.total_success,
-            "fail": self.total_fail,
+            "success": wins,
+            "fail": max(0, judged - wins),
             "average_reward": avg,
             "success_rate": rate,
+            "graded_judged": judged,
             # The only numbers that reflect real Reddit outcomes.
             "graded_actions": self.graded_actions,
             "graded_average_reward": graded_avg,

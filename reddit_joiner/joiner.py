@@ -4,7 +4,7 @@ Automate human-like Reddit browsing, AI comments, and spreadsheet posts
 across AdsPower profiles.
 
 Step 1 — Launch AdsPower profile (Start API + Selenium debuggerAddress)
-Step 2 — 5–10 min human activity: Home first, then sub → Home hops.
+Step 2 — 8–15 min human activity: Home first, then sub → Home hops.
          1 post + 2 comments / 48h. Bouncy scroll; skip image/video.
 Step 3 — 2 general comments on new posts or comments.csv links.
 Step 4 — Account summary (AI comments, upvotes, live posts)
@@ -288,15 +288,15 @@ _JOIN_ARRIVE_LABELS = {
 }
 
 ACTIVITY_ON_HOMEPAGE = 12  # unused; home time comes from HOME_ACTIVITY_SHARE
-ACTIVITY_ON_SUBREDDIT = (12, 28)  # quick look inside a community, then back to Home
-ACCOUNT_SESSION_SECONDS = 7 * 60  # fallback only; live sittings roll 5–10 min
+ACTIVITY_ON_SUBREDDIT = (18, 42)  # look inside a community, then back to Home
+ACCOUNT_SESSION_SECONDS = 12 * 60  # fallback only; live sittings roll 8–15 min
 POST_IN_SESSION_FRACTION = 0.45  # attempt post mid-sitting when there is room
 HOME_ACTIVITY_SHARE = 0.65  # default; each sitting rolls its own Home share
 HOME_ACTIVITY_SHARE_RANGE = (0.52, 0.78)
-HOME_ACTIVITY_BEFORE_JOIN = (70, 130)  # first Home stretch, then shifted per sitting
-HOME_BETWEEN_SUBS = (35, 70)  # Home hop between communities
-MIN_SUBREDDIT_DWELL = 10.0
-MAX_SUBREDDIT_DWELL = 30.0  # hard cap so no community eats the sitting
+HOME_ACTIVITY_BEFORE_JOIN = (110, 200)  # first Home stretch, then shifted per sitting
+HOME_BETWEEN_SUBS = (50, 100)  # Home hop between communities
+MIN_SUBREDDIT_DWELL = 12.0
+MAX_SUBREDDIT_DWELL = 50.0  # hard cap so no community eats the sitting
 # Ceiling on ALL time inside communities per sitting — feed browsing, rules,
 # thread reads and the comment flow together. Measured on the clock, so extras
 # inside a community cannot quietly stretch the visit.
@@ -417,7 +417,7 @@ COMMENT_MAX_PER_WEEK = COMMENTS_PER_WINDOW
 SHEET_COMMENTS_PER_RUN = 2  # comments.csv uses the same 48h comment budget
 COMMENT_EDIT_WAIT = (180, 240)  # after a comments.csv comment, wait 3–4 min then edit
 COMMENTS_PER_RUN = 2
-SESSION_GENERAL_COMMENTS = (1, 1)  # one general comment fits a 5–10 min sitting
+SESSION_GENERAL_COMMENTS = (1, 1)  # one general comment fits an 8–15 min sitting
 SESSION_COMMENT_CAP = 2
 GENERAL_COMMENT_SUBS_PER_RUN = 4
 GENERAL_COMMENT_OPENS_PER_SUB = 3
@@ -507,7 +507,7 @@ MAX_PARALLEL_PROFILES = 8  # how many Chrome profiles run at once (rest wait in 
 PARALLEL_START_STAGGER = (7.0, 28.0)  # seconds between launching each Chrome
 
 # Each account gets its own sitting length and start time this run.
-SESSION_SECONDS_RANGE = (5 * 60, 10 * 60)
+SESSION_SECONDS_RANGE = (8 * 60, 15 * 60)
 # AdsPower copies profile files on start. A full /home disk is why browsers
 # fail with "Failed to start browser" and logs die with "No space left on device".
 MIN_FREE_DISK_MB = 400.0
@@ -768,7 +768,7 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         profile_gap=rng.uniform(32.0, 140.0),
         between_break_chance=rng.uniform(0.12, 0.52),
         subreddit_dwell=dwell,
-        home_before=_shift_pair(rng, HOME_ACTIVITY_BEFORE_JOIN, 0.92, 1.08, min_lo=60.0),
+        home_before=_shift_pair(rng, HOME_ACTIVITY_BEFORE_JOIN, 0.92, 1.08, min_lo=90.0),
         home_between=_shift_pair(rng, HOME_BETWEEN_SUBS, 0.85, 1.2, min_lo=MIN_HOME_HOP),
         # Keep scroll ticks small and the cadence tight so motion stays smooth
         scroll_tick_px=_shift_pair(rng, SCROLL_TICK_PX, 0.9, 1.1, min_lo=12, as_int=True),
@@ -873,7 +873,7 @@ def unique_session_plan(
     def _apply(style: SessionStyle) -> SessionStyle:
         if assigned_seconds:
             lo, hi = SESSION_SECONDS_RANGE
-            jitter = _rng().uniform(-22.0, 22.0)
+            jitter = _rng().uniform(-40.0, 40.0)
             style.session_seconds = min(
                 float(hi), max(float(lo), float(assigned_seconds) + jitter)
             )
@@ -915,7 +915,7 @@ def assign_profile_schedules(
         return {}
     lo_min = SESSION_SECONDS_RANGE[0] / 60.0
     hi_min = SESSION_SECONDS_RANGE[1] / 60.0
-    # Keep sittings distinct inside the 5–10 min band (~20s apart).
+    # Keep sittings distinct inside the 8–15 min band.
     min_gap_min = 0.35
     minutes: List[float] = []
     for _ in targets:
@@ -6571,7 +6571,7 @@ def past_deadline() -> bool:
 def human_sleep(seconds: float, remaining: Optional[float] = None) -> float:
     """
     Sleep, clamped by both the caller's own budget and the sitting deadline, so
-    one long pause can never push a 5–10 min sitting over its time.
+    one long pause can never push an 8–15 min sitting over its time.
     """
     nap = max(0.0, float(seconds))
     try:

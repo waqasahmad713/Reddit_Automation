@@ -28,6 +28,7 @@ SUBREDDIT_LOG_PATH = DATA_DIR / "adspower_subreddit_log.json"
 RULES_CACHE_PATH = DATA_DIR / "subreddit_rules.json"
 JOINER_LOG = DATA_DIR / "joiner_run.log"
 SESSION_PATTERNS_PATH = DATA_DIR / "session_patterns.json"
+COMMUNITY_MEMORY_PATH = DATA_DIR / "community_memory.json"
 SUMMARIES_DIR = DATA_DIR / "summaries"
 
 

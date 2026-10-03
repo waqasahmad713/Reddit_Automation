@@ -29,6 +29,8 @@ _ANALYZER = None
 AI_TIMEOUT = 22
 AI_TIMEOUT_REASONING = 50
 OLLAMA_TIMEOUT = 180
+COMMENT_MODEL_TIMEOUT = 16
+COMMENT_BACKUP_TIMEOUT = 20
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral:7b").strip() or "mistral:7b"
 OMNIROUTE_HOST = os.environ.get("OMNIROUTE_HOST", "http://127.0.0.1:20128").rstrip("/")
@@ -706,6 +708,12 @@ def omniroute_base() -> str:
 
 
 def _omniroute_text(prompt: str, system: str, api_key: str, max_tokens: int) -> str:
+    return _omniroute_comment(prompt, system, max_tokens, OLLAMA_TIMEOUT)
+
+
+def _omniroute_comment(
+    prompt: str, system: str, max_tokens: int, timeout: Optional[float]
+) -> str:
     """OpenAI-compatible chat via diegosouzapw/OmniRoute (http://localhost:20128/v1)."""
     if not omniroute_ready():
         raise RuntimeError("OmniRoute is not running at " + OMNIROUTE_HOST)
@@ -725,6 +733,7 @@ def _omniroute_text(prompt: str, system: str, api_key: str, max_tokens: int) -> 
     )
     last_error: Optional[BaseException] = None
     seen = set()
+    wait = float(timeout or OLLAMA_TIMEOUT)
     for model in models:
         if not model or model in seen:
             continue
@@ -732,12 +741,12 @@ def _omniroute_text(prompt: str, system: str, api_key: str, max_tokens: int) -> 
         try:
             return _openai_compat_text(
                 url=f"{OMNIROUTE_HOST}/v1/chat/completions",
-                api_key=api_key or OMNIROUTE_API_KEY,
+                api_key=OMNIROUTE_API_KEY,
                 model=model,
                 prompt=prompt,
                 system=system,
                 max_tokens=max_tokens,
-                timeout=OLLAMA_TIMEOUT,
+                timeout=wait,
             )
         except Exception as exc:
             last_error = exc
@@ -778,6 +787,12 @@ def _ollama_has_model(model: str) -> bool:
 
 
 def _ollama_text(prompt: str, system: str, api_key: str, max_tokens: int) -> str:
+    return _ollama_comment(prompt, system, max_tokens, OLLAMA_TIMEOUT)
+
+
+def _ollama_comment(
+    prompt: str, system: str, max_tokens: int, timeout: Optional[float]
+) -> str:
     """Local Ollama chat. Default model is mistral:7b."""
     model = ollama_model_name()
     if not ollama_ready():
@@ -799,7 +814,7 @@ def _ollama_text(prompt: str, system: str, api_key: str, max_tokens: int) -> str
                 "num_predict": max(80, int(max_tokens or 160)),
             },
         },
-        timeout=OLLAMA_TIMEOUT,
+        timeout=float(timeout or OLLAMA_TIMEOUT),
     )
     if response.status_code == 404:
         raise RuntimeError(f"Ollama model {model} not found")
@@ -820,26 +835,40 @@ def _llm_text(
     *,
     fast: bool = False,
     prefer: str = "",
+    timeout: Optional[float] = None,
+    max_tries: int = 0,
+    skip: Optional[set] = None,
 ) -> Tuple[str, str]:
     """Try OmniRoute first, then local Ollama (mistral:7b), then cloud APIs.
 
     `prefer="openai"` is the comment path: that key is used before local models.
+    `max_tries` caps how many providers run. Comments use 1, then one backup.
     """
     keys = _api_keys()
     errors = []
-    if prefer == "openai" and keys.get("openai"):
+    used = 0
+    limit = int(max_tries or 0)
+    blocked = {str(item) for item in (skip or set())}
+
+    def _budget() -> bool:
+        return limit <= 0 or used < limit
+
+    if prefer == "openai" and keys.get("openai") and "openai" not in blocked and _budget():
+        used += 1
         try:
             return _openai_text(prompt, system, keys["openai"], max_tokens), "openai"
         except Exception as exc:
             errors.append(f"openai: {_scrub_secret(str(exc))}")
-    if omniroute_ready():
+    if omniroute_ready() and "omniroute" not in blocked and _budget():
+        used += 1
         try:
-            return _omniroute_text(prompt, system, OMNIROUTE_API_KEY, max_tokens), "omniroute"
+            return _omniroute_comment(prompt, system, max_tokens, timeout), "omniroute"
         except Exception as exc:
             errors.append(f"omniroute: {_scrub_secret(str(exc))}")
-    if ollama_ready():
+    if ollama_ready() and "ollama" not in blocked and _budget():
+        used += 1
         try:
-            return _ollama_text(prompt, system, "", max_tokens), f"ollama:{ollama_model_name()}"
+            return _ollama_comment(prompt, system, max_tokens, timeout), f"ollama:{ollama_model_name()}"
         except Exception as exc:
             errors.append(f"ollama: {_scrub_secret(str(exc))}")
     tries = [
@@ -857,8 +886,9 @@ def _llm_text(
             if item[0] in {"huggingface", "deepseek", "openrouter", "gemini", "groq"}
         ]
     for name, key, fn in tries:
-        if not key:
+        if not key or name in blocked or not _budget():
             continue
+        used += 1
         try:
             if name == "gemini":
                 return _gemini_text(prompt, system, key, max_tokens), "gemini"
@@ -893,6 +923,7 @@ def generate_ai_comment(
     tone: str = "friendly",
     analysis: Optional[Dict[str, object]] = None,
     rules: str = "",
+    example: str = "",
 ) -> Tuple[str, str]:
     """
     Return (comment, provider). Raises RuntimeError if no provider is configured
@@ -936,9 +967,16 @@ def generate_ai_comment(
         if rule_blob
         else ""
     )
+    sample = re.sub(r"\s+", " ", (example or "").strip())[:280]
+    example_line = (
+        f" A comment that stayed up in this community: {sample} "
+        "Match that natural voice. Do not copy it."
+        if sample
+        else ""
+    )
     prompt = (
         f"Write one Reddit comment (1-2 sentences) for {place}. Voice this time: {voice}. "
-        f"{tone_line} {mood_line} {intent_line}{rule_line} "
+        f"{tone_line} {mood_line} {intent_line}{rule_line}{example_line} "
         "Write the way a person talks, in this voice only. Do not reuse a stock friendly opener. "
         "Use a real detail from the title or body. "
         "Do not say great post, thanks for sharing, nice write-up, or hope this helps. "
@@ -952,16 +990,21 @@ def generate_ai_comment(
         "Follow the community rules if they were given. "
         "Never mention being a bot, karma, or that the account is new."
     )
-    text, provider = _llm_text(prompt, system, max_tokens=160, fast=True, prefer="openai")
-    cleaned = _clean_comment(text)
-    if cleaned and not _comment_uses_post(cleaned, title, body):
-        retry = (
-            prompt
-            + "\n\nYour comment must name a specific detail from the title or body. "
-            "Do not write a generic reply."
+    try:
+        text, provider = _llm_text(
+            prompt,
+            system,
+            max_tokens=160,
+            fast=True,
+            prefer="openai",
+            timeout=COMMENT_MODEL_TIMEOUT,
+            max_tries=2,
         )
-        text, provider = _llm_text(retry, system, max_tokens=160, fast=True, prefer="openai")
-        cleaned = _clean_comment(text)
+    except Exception as exc:
+        raise RuntimeError(
+            f"comment model timed out ({_scrub_secret(str(exc))})"
+        ) from exc
+    cleaned = _clean_comment(text)
     if not cleaned:
         # The old loose path posted raw model output whenever cleaning came back
         # empty, skipping every filter above — which is exactly how a refusal or

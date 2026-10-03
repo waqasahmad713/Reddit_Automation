@@ -292,8 +292,17 @@ def reward_from_status(
     downvote: float = -5.0,
     removed: float = -8.0,
     filtered: float = -3.0,
+    next_day_live: float = 3.0,
+    account_ready: bool = True,
+    age_seconds: float = 0.0,
 ) -> Optional[float]:
-    """Map a live/removed/score check to a DQN reward. None means try again later."""
+    """Map a later live/removed/score check to a DQN reward.
+
+    None means try again later. A filter/collapse on an account that was not
+    ready to speak does not lower the tone — that is a 0.0 note, not a fail.
+    Only a removal or deletion on an account that was allowed to speak is a
+    real negative. A comment still on the thread the next day scores higher.
+    """
     if not info:
         return None
     status = str(info.get("status") or "").strip().lower()
@@ -301,9 +310,14 @@ def reward_from_status(
         score = int(info.get("score") or 0)
     except (TypeError, ValueError):
         score = 0
+    next_day = float(age_seconds or 0) >= 20 * 3600
     if status in {"removed", "deleted"}:
+        if not account_ready:
+            return 0.0
         return float(removed)
     if status in {"filtered", "collapsed"}:
+        if not account_ready:
+            return 0.0
         return float(filtered)
     if status != "live":
         return None
@@ -312,11 +326,14 @@ def reward_from_status(
     if score >= 5:
         return float(upvote_5)
     if score >= 2:
-        return float(score_2)
+        bonus = float(score_2)
+        return bonus + (1.0 if next_day else 0.0)
     if score <= -3:
         return float(downvote)
     if score < 0:
         return float(score_neg)
+    if next_day:
+        return float(next_day_live)
     return float(still_live)
 
 
@@ -660,13 +677,17 @@ class RLAgent:
         next_state: Any = None,
         next_actions: Optional[Iterable[str]] = None,
         graded: bool = False,
+        train: bool = True,
     ) -> None:
         """
         Train on one transition. `graded` marks a reward that came from a real
         observed outcome (a live/removed/score check) rather than bookkeeping
         like "rules were read". Only graded rows move epsilon and the quality
         metrics, so cheap guaranteed rewards cannot flatter the report.
+        `train=False` keeps a small note on the sitting without touching the net.
         """
+        if not train:
+            return
         with self._lock:
             try:
                 reward = self._clip_reward(reward)
@@ -1017,15 +1038,27 @@ class RLAgent:
         except Exception:
             return
 
-    def queue_delayed(self, state: Any, action: str, url: str, kind: str) -> None:
+    def queue_delayed(
+        self,
+        state: Any,
+        action: str,
+        url: str,
+        kind: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if not url:
             return
         try:
             self._ensure_db()
-            state_json = ""
+            payload: Dict[str, Any] = {}
             if isinstance(state, dict):
+                payload.update(state)
+            if extra:
+                payload.update(extra)
+            state_json = ""
+            if payload:
                 try:
-                    state_json = json.dumps(state, default=str)
+                    state_json = json.dumps(payload, default=str)
                 except Exception:
                     state_json = ""
             with self._connect() as conn:
@@ -1068,6 +1101,7 @@ class RLAgent:
         score_neg: float = -2.0,
         removed: float = -8.0,
         filtered: float = -3.0,
+        next_day_live: float = 3.0,
         min_age_seconds: float = 1200,
         stale_seconds: float = 3 * 86400,
         limit: int = 50,
@@ -1131,6 +1165,24 @@ class RLAgent:
                     # never observed is what poisons the model.
                     self._retire_unchecked(row["id"])
                     continue
+                state: Any = str(row["state_key"] or "")
+                raw_json = ""
+                try:
+                    raw_json = str(row["state_json"] or "")
+                except Exception:
+                    raw_json = ""
+                extra: Dict[str, Any] = {}
+                if raw_json:
+                    try:
+                        loaded = json.loads(raw_json)
+                        if isinstance(loaded, dict):
+                            state = loaded
+                            extra = loaded
+                    except Exception:
+                        pass
+                ready = extra.get("account_ready")
+                if ready is None:
+                    ready = True
                 reward = reward_from_status(
                     info,
                     still_live=still_live,
@@ -1141,29 +1193,26 @@ class RLAgent:
                     downvote=downvote,
                     removed=removed,
                     filtered=filtered,
+                    next_day_live=next_day_live,
+                    account_ready=bool(ready),
+                    age_seconds=age,
                 )
                 if reward is None:
                     if age < float(stale_seconds):
                         continue
                     self._retire_unchecked(row["id"])
                     continue
-                state: Any = str(row["state_key"] or "")
-                raw_json = ""
-                try:
-                    raw_json = str(row["state_json"] or "")
-                except Exception:
-                    raw_json = ""
-                if raw_json:
-                    try:
-                        loaded = json.loads(raw_json)
-                        if isinstance(loaded, dict):
-                            state = loaded
-                    except Exception:
-                        pass
-                self.update_q_value(
-                    state, str(row["action"]), float(reward), None, graded=True
-                )
                 status = str(info.get("status") or "")
+                status_l = status.strip().lower()
+                train_tone = True
+                if status_l in {"filtered", "collapsed"} and not ready:
+                    train_tone = False
+                if status_l in {"removed", "deleted"} and not ready:
+                    train_tone = False
+                if train_tone:
+                    self.update_q_value(
+                        state, str(row["action"]), float(reward), None, graded=True
+                    )
                 score = int(info.get("score") or 0)
                 try:
                     with self._connect() as conn:
@@ -1192,6 +1241,11 @@ class RLAgent:
                         "reward": float(reward),
                         "action": str(row["action"] or ""),
                         "kind": str(row["kind"] or ""),
+                        "subreddit": str(extra.get("target_subreddit") or extra.get("subreddit") or ""),
+                        "comment_text": str(extra.get("comment_text") or extra.get("_comment_text") or ""),
+                        "account_ready": bool(ready),
+                        "trained": bool(train_tone),
+                        "age_seconds": float(age),
                     }
                 )
                 updated += 1

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -377,6 +378,38 @@ def update_ai_comment_outcome(url: str, *, score: int = 0, status: str = "") -> 
                 """,
                 (delta, target),
             )
+
+
+def live_upvoted_comments(subreddit: str, *, min_score: int = 1, limit: int = 6) -> List[str]:
+    """Comment text that stayed live with upvotes in this community."""
+    name = str(subreddit or "").strip().lstrip("r/").lower()
+    if not name:
+        return []
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT comment, upvotes
+            FROM ai_comments
+            WHERE lower(IFNULL(subreddit, '')) = ?
+              AND lower(IFNULL(status, '')) = 'live'
+              AND IFNULL(upvotes, 0) >= ?
+              AND length(IFNULL(comment, '')) >= 18
+            ORDER BY upvotes DESC, id DESC
+            LIMIT ?
+            """,
+            (name, max(1, int(min_score)), max(1, int(limit))),
+        ).fetchall()
+    found: List[str] = []
+    seen = set()
+    for row in rows:
+        text = re.sub(r"\s+", " ", str(row["comment"] or "")).strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        found.append(text)
+    return found
 
 
 def already_commented_url(user_id: str, url: str) -> bool:

@@ -6,7 +6,7 @@ One run handles every `enabled=yes` account in `sheets/accounts.csv`. Up to **4*
 
 ## What one account does
 
-Each sitting is **8–15 minutes**, mostly on Home, with short visits to communities.
+Each sitting is **5–10 minutes**, mostly on Home, with short visits to communities.
 
 | Action | Limit |
 | --- | --- |

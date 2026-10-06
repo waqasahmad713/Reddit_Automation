@@ -189,138 +189,110 @@ def is_commentable_intent(intent: str) -> bool:
     return str(intent or "").strip().lower() in COMMENTABLE_INTENTS
 
 
-_HUMAN_VOICES = (
-    (
-        "casual",
-        "Sound like a person typing a quick reply. Contractions. A little uneven. Not polished.",
-    ),
-    (
-        "curious",
-        "Sound curious. Share one short thought, then ask something you actually want to know about their situation.",
-    ),
-    (
-        "plain",
-        "Sound plain and direct. No warm filler and no extra friendliness.",
-    ),
-    (
-        "careful",
-        "Sound a bit unsure. Say what you would try and admit you might be wrong.",
-    ),
-    (
-        "direct",
-        "Give one clear suggestion. No greeting and no sign off.",
-    ),
-    (
-        "chatty",
-        "Sound like you just saw this while scrolling. One personal angle, then the point.",
-    ),
+_CONTRACTIONS = (
+    (r"\bwon't\b", "will not"),
+    (r"\bcan't\b", "cannot"),
+    (r"\bshan't\b", "shall not"),
+    (r"\bain't\b", "is not"),
+    (r"\bI'm\b", "I am"),
+    (r"\bI've\b", "I have"),
+    (r"\bI'll\b", "I will"),
+    (r"\bI'd\b", "I would"),
+    (r"\byou're\b", "you are"),
+    (r"\byou've\b", "you have"),
+    (r"\byou'll\b", "you will"),
+    (r"\byou'd\b", "you would"),
+    (r"\bwe're\b", "we are"),
+    (r"\bwe've\b", "we have"),
+    (r"\bwe'll\b", "we will"),
+    (r"\bwe'd\b", "we would"),
+    (r"\bthey're\b", "they are"),
+    (r"\bthey've\b", "they have"),
+    (r"\bthey'll\b", "they will"),
+    (r"\bthey'd\b", "they would"),
+    (r"\bit's\b", "it is"),
+    (r"\bit'll\b", "it will"),
+    (r"\bit'd\b", "it would"),
+    (r"\bthat's\b", "that is"),
+    (r"\bthere's\b", "there is"),
+    (r"\bhere's\b", "here is"),
+    (r"\bwhat's\b", "what is"),
+    (r"\bwho's\b", "who is"),
+    (r"\bdon't\b", "do not"),
+    (r"\bdoesn't\b", "does not"),
+    (r"\bdidn't\b", "did not"),
+    (r"\bcouldn't\b", "could not"),
+    (r"\bshouldn't\b", "should not"),
+    (r"\bwouldn't\b", "would not"),
+    (r"\bisn't\b", "is not"),
+    (r"\baren't\b", "are not"),
+    (r"\bwasn't\b", "was not"),
+    (r"\bweren't\b", "were not"),
+    (r"\bhasn't\b", "has not"),
+    (r"\bhaven't\b", "have not"),
+    (r"\bhadn't\b", "had not"),
+    (r"\blet's\b", "let us"),
 )
-_LAST_HUMAN_VOICE = ""
 
 
-def _next_human_voice() -> Tuple[str, str]:
-    """Pick a different human voice from the last comment."""
-    global _LAST_HUMAN_VOICE
-    names = [name for name, _line in _HUMAN_VOICES if name != _LAST_HUMAN_VOICE]
-    name = random.choice(names or [item[0] for item in _HUMAN_VOICES])
-    _LAST_HUMAN_VOICE = name
-    line = dict(_HUMAN_VOICES)[name]
-    return name, line
+def _expand_contractions(text: str) -> str:
+    """Turn contractions into full words. Possessives like OP's stay."""
+    value = (text or "").replace("’", "'").replace("‘", "'")
+
+    def _swap(match: re.Match[str], expanded: str) -> str:
+        raw = match.group(0)
+        if raw[0].isupper():
+            return expanded[0].upper() + expanded[1:]
+        return expanded
+
+    for pattern, expanded in _CONTRACTIONS:
+        value = re.sub(
+            pattern,
+            lambda match, word=expanded: _swap(match, word),
+            value,
+            flags=re.I,
+        )
+    return value
 
 
-_COMMENT_CHAR_FIX = str.maketrans(
-    {
-        "-": " ",
-        ",": " ",
-        '"': "",
-        ";": " ",
-        ":": " ",
-        "_": " ",
-        "*": "",
-        "!": "",
-        "$": "",
-        "%": "",
-        "–": " ",
-        "—": " ",
-        "“": "",
-        "”": "",
-    }
-)
+def _unwrap_comment_quotes(text: str) -> str:
+    value = (text or "").strip()
+    quotes = {'"', "'", "“", "”", "‘", "’"}
+    while len(value) >= 2 and value[0] in quotes and value[-1] in quotes:
+        value = value[1:-1].strip()
+    return value
 
 
 def _strip_comment_chars(text: str) -> str:
-    """Drop the marks that make a comment look copied or formatted."""
-    value = (text or "").translate(_COMMENT_CHAR_FIX)
+    """Drop hashtags and asterisks. Keep commas, apostrophes, and question marks."""
+    value = _unwrap_comment_quotes(text or "")
+    value = re.sub(r"#\w+", "", value)
+    value = value.replace("*", "")
+    value = re.sub(r"[$%_]", "", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
 def local_comment_for_post(analysis: Dict[str, object]) -> str:
-    """Fallback comment that answers this post in a rotating human voice."""
-    title = re.sub(r"\s+", " ", str(analysis.get("title") or "")).strip()
-    words = title.split()
-    detail = " ".join(words[:8]).strip(" ?.!")
-    if len(detail) > 60:
-        detail = detail[:57].rstrip()
-    if len(detail) < 8:
-        detail = str(analysis.get("topic") or "what you described").strip()
-    intent = str(analysis.get("intent") or "other")
-    voice, _line = _next_human_voice()
-    if intent == "help":
-        options = {
-            "casual": f"I'd poke at {detail} first. What have you already tried?",
-            "curious": f"With {detail} what is the one thing that already failed for you?",
-            "plain": f"Start with one small change on {detail} and see if it moves.",
-            "careful": f"I might be wrong but I would only change one thing around {detail} first.",
-            "direct": f"Deal with {detail} before anything else.",
-            "chatty": f"I got stuck on something like {detail} last month. The small fix was the one that stuck.",
-        }
-    elif intent == "suggestion":
-        options = {
-            "casual": f"For {detail} I would take the easy option and live with it for a week.",
-            "curious": f"On {detail} is time or money the tighter limit for you?",
-            "plain": f"Pick the {detail} option you can undo. Skip the fancy one until you know you will use it.",
-            "careful": f"Not sure I would go big on {detail}. The smaller choice is easier to walk back.",
-            "direct": f"Take the simpler {detail} option first.",
-            "chatty": f"When I had to choose on {detail} I went with whatever I could cancel. Worked out fine.",
-        }
-    elif intent == "review":
-        options = {
-            "casual": f"The {detail} part is the bit I wanted more of. Would you buy it again?",
-            "curious": f"On {detail} what surprised you once you actually used it?",
-            "plain": f"The useful part of this is the everyday detail on {detail}.",
-            "careful": f"Hard to tell from one take but {detail} sounds like the thing that mattered.",
-            "direct": f"Would you pick {detail} again knowing what you know now?",
-            "chatty": f"I always read these for the boring {detail} details. How long have you had it?",
-        }
-    elif intent == "question":
-        options = {
-            "casual": f"For {detail} I would use what you already have and only add something if there is a real gap.",
-            "curious": f"On {detail} what is the must have for you?",
-            "plain": f"The short answer on {detail} depends on whether time or money is tighter.",
-            "careful": f"I do not have a perfect answer on {detail}. I would start small and compare notes.",
-            "direct": f"Look at what you already have for {detail} before adding anything new.",
-            "chatty": f"I asked something close to {detail} a while back. The useful replies all started from the budget.",
-        }
-    else:
-        options = {
-            voice: f"The {detail} part is what I actually wanted to reply to.",
-        }
-    return _clean_comment(options.get(voice) or next(iter(options.values())))
+    """Do not invent a title-based line. Callers should skip the comment."""
+    raise RuntimeError("no title fallback for comments")
 
 
 def _clean_comment(text: str) -> str:
-    value = _strip_think(text or "").strip().strip('"').strip("'")
+    value = _strip_think(text or "").strip()
     value = _strip_fences(value)
+    value = _unwrap_comment_quotes(value)
     value = re.sub(r"(?is)^(?:sure|okay|ok|here(?:'s| is)|comment:)\s*[:\-]*\s*", "", value)
     value = _strip_comment_chars(value)
-    parts = re.split(r"(?<=[.!?])\s+", value)
+    value = _expand_contractions(value)
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", value) if part.strip()]
     if len(parts) > 2:
         value = " ".join(parts[:2]).strip()
+    else:
+        value = " ".join(parts).strip()
     value = value[:300].strip()
     letters = len(re.findall(r"[A-Za-z]", value))
     if letters < 18:
         return ""
-    # Checked last, so it also catches tells revealed by the trimming above.
     if looks_like_automation(value):
         return ""
     return value
@@ -916,6 +888,22 @@ def _comment_uses_post(comment: str, title: str, body: str) -> bool:
     return any(word in blob for word in words[:12])
 
 
+def _poster_own_words(title: str, body: str) -> str:
+    """A short stretch of the poster's own wording to echo in the reply."""
+    blob = re.sub(r"\s+", " ", f"{title or ''} {body or ''}").strip()
+    quoted = re.findall(r"\"([^\"]{8,80})\"", blob)
+    if quoted:
+        return quoted[0].strip()
+    for sent in re.split(r"(?<=[.!?])\s+", blob):
+        words = [w for w in sent.split() if w]
+        if 4 <= len(words) <= 12:
+            return " ".join(words)
+    words = blob.split()
+    if len(words) >= 4:
+        return " ".join(words[:8])
+    return blob[:80]
+
+
 def generate_ai_comment(
     title: str,
     body: str,
@@ -937,7 +925,16 @@ def generate_ai_comment(
             "post is not help, suggestion, review, or question"
         )
     place = f"r/{subreddit.strip()}" if (subreddit or "").strip() else "this Reddit community"
-    voice, tone_line = _next_human_voice()
+    picked = str(tone or "friendly").strip().lower() or "friendly"
+    tone_line = {
+        "friendly": (
+            "Tone: friendly. Warm, like a reply to someone you know. "
+            "Not a stranger's canned niceness."
+        ),
+        "expert": "Tone: expert. One concrete step. No lecture and no list.",
+        "funny": "Tone: funny. One light line. Not a joke setup and not a punchline.",
+        "neutral": "Tone: neutral. Plain. No filler.",
+    }.get(picked, "Tone: friendly. Warm, like a reply to someone you know.")
     mood_line = {
         "negative": "The post is frustrated or unhappy. Be careful and empathetic. Do not cheerlead or say the post is great.",
         "positive": "The post is upbeat. You can agree, but still mention something specific.",
@@ -945,20 +942,17 @@ def generate_ai_comment(
     }.get(mood, "Stay on the actual topic.")
     intent_line = {
         "help": (
-            "They need help. Give one practical next step from their actual situation, "
-            "then ask one short question so they can reply. Sound like you have dealt with this, not like a guide."
+            "They need help. Give one practical next step from their actual situation. "
+            "Sound like you have dealt with this, not like a guide."
         ),
         "suggestion": (
-            "They want ideas. Recommend one specific option that fits what they wrote, "
-            "and ask which limit matters more so the thread keeps going."
+            "They want ideas. Recommend one specific option that fits what they wrote."
         ),
         "review": (
-            "This is a review or 'is it worth it' post. React to one detail they mentioned "
-            "and ask whether they would choose it again or what surprised them."
+            "This is a review or 'is it worth it' post. React to one detail they mentioned."
         ),
         "question": (
-            "Answer their actual question in plain words. Then ask one follow-up that a person "
-            "in the thread would actually answer."
+            "Answer their actual question in plain words."
         ),
     }.get(intent, "Reply to what they actually said.")
     rule_blob = re.sub(r"\s+", " ", (rules or "").strip())[:900]
@@ -974,20 +968,28 @@ def generate_ai_comment(
         if sample
         else ""
     )
+    phrase = _poster_own_words(title, body)
+    phrase_line = (
+        f' Use this phrase from the poster, in their own words: "{phrase}".'
+        if phrase
+        else " Use one detail from the post in the poster's own words."
+    )
     prompt = (
-        f"Write one Reddit comment (1-2 sentences) for {place}. Voice this time: {voice}. "
-        f"{tone_line} {mood_line} {intent_line}{rule_line}{example_line} "
-        "Write the way a person talks, in this voice only. Do not reuse a stock friendly opener. "
-        "Use a real detail from the title or body. "
-        "Do not say great post, thanks for sharing, nice write-up, or hope this helps. "
-        "Do not use these characters anywhere: - , \" ; : _ * ! $ % "
-        "No hashtags, no username, no asking for upvotes.\n\n"
+        f"Write one Reddit comment for {place}, as if you typed it on your phone. "
+        f"{tone_line} {mood_line} {intent_line}{rule_line}{example_line}{phrase_line} "
+        "One sentence is enough when the point is clear. Two is the most. Do not pad. "
+        "Do not end with a question every time. Only ask if you actually need an answer. "
+        'Write full words. Do not use contractions. Write "I have" not "I\'ve", '
+        '"do not" not "don\'t", "I would" not "I\'d", "it is" not "it\'s". '
+        "Keep commas, apostrophes, and question marks if you need them. "
+        "Do not wrap the whole comment in quotes. No hashtags, no asterisks, no username, "
+        "no asking for upvotes. "
+        "Do not say great post, thanks for sharing, nice write-up, or hope this helps.\n\n"
         f"Title: {title}\n\n{(body or '')[:1200]}"
     )
     system = (
-        "You write short Reddit comments that answer the post and invite a reply. "
-        "Only comment as if this is a help request, a suggestion thread, a review, or a question. "
-        "Follow the community rules if they were given. "
+        "You write short Reddit comments that sound like a person typed them. "
+        "Stay in the given tone. Follow the community rules if they were given. "
         "Never mention being a bot, karma, or that the account is new."
     )
     try:
@@ -1006,19 +1008,8 @@ def generate_ai_comment(
         ) from exc
     cleaned = _clean_comment(text)
     if not cleaned:
-        # The old loose path posted raw model output whenever cleaning came back
-        # empty, skipping every filter above — which is exactly how a refusal or
-        # a reasoning dump reaches Reddit. Salvage the first sentences instead,
-        # and hold them to the same checks.
-        loose = _strip_fences(_strip_think(text or "")).strip().strip('"')
-        loose = _strip_comment_chars(
-            " ".join(re.split(r"(?<=[.!?])\s+", loose)[:2])[:280]
-        )
-        if len(re.findall(r"[A-Za-z]", loose)) >= 18 and not looks_like_automation(loose):
-            cleaned = loose
-    if not cleaned:
         raise RuntimeError("AI comment was empty or looked automated")
-    return cleaned, f"{provider}/{voice}"
+    return cleaned, f"{provider}/{picked}"
 
 
 def generate_ai_post(

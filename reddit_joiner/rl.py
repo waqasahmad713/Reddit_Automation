@@ -13,7 +13,6 @@ import json
 import os
 import pickle
 import random
-import signal
 import sqlite3
 import threading
 import time
@@ -1311,16 +1310,6 @@ class RLAgent:
                 pass
 
         atexit.register(_save_quiet)
-
-        def _handle(signum: int, _frame: Any) -> None:
-            _save_quiet()
-            raise SystemExit(128 + int(signum))
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                signal.signal(sig, _handle)
-            except Exception:
-                pass
 
 
 _AGENT: Optional[RLAgent] = None

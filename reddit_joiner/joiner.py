@@ -25,12 +25,13 @@ import random
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -427,8 +428,8 @@ KARMA_GROWTH_ENABLED = True
 COMMUNITY_GENERAL_POST = True  # when posts.csv has no row, write one post that fits the community
 GENERAL_POSTS_PER_WEEK = POSTS_PER_WINDOW
 MIN_KARMA_TO_POST = 6  # karma greater than 5; a community can still require more
-GENERAL_COMMENT_MIN_AGE_DAYS = 7  # general comments only after the account is older than 7 days
-WARMUP_MIN_AGE_DAYS = 7  # 7 days or younger: no general comment
+GENERAL_COMMENT_MIN_AGE_DAYS = 4  # general activity starts when the account is 4 days old
+WARMUP_MIN_AGE_DAYS = 4  # younger than 4 days: browse only
 WARMUP_MIN_KARMA = 5  # karma 5 or less: no post
 MAX_JOINS_PER_SESSION = 1  # one new Join click per sitting after warmup
 GENERAL_POST_DAYS = ACTION_WINDOW_DAYS
@@ -2085,6 +2086,57 @@ def log(message: str) -> None:
         print(line, flush=True)
 
 
+_STOP_RUN = threading.Event()
+_STOP_HITS = 0
+_STOP_HITS_LOCK = threading.Lock()
+
+
+def stop_requested() -> bool:
+    return _STOP_RUN.is_set()
+
+
+def request_stop(reason: str = "Ctrl+C") -> None:
+    if _STOP_RUN.is_set():
+        return
+    _STOP_RUN.set()
+    log(f"{reason} — stopping. No more accounts will start. Press Ctrl+C again to force quit.")
+
+
+def interruptible_sleep(seconds: float) -> float:
+    """Sleep in short chunks so Ctrl+C can abort a wait."""
+    end = time.time() + max(0.0, float(seconds))
+    slept = 0.0
+    while not stop_requested():
+        left = end - time.time()
+        if left <= 0:
+            break
+        chunk = min(0.25, left)
+        time.sleep(chunk)
+        slept += chunk
+    return slept
+
+
+def _on_stop_signal(signum: int, _frame: Any) -> None:
+    global _STOP_HITS
+    with _STOP_HITS_LOCK:
+        _STOP_HITS += 1
+        hits = _STOP_HITS
+    if hits == 1:
+        reason = "Ctrl+C" if int(signum) == int(signal.SIGINT) else "Stop signal"
+        request_stop(reason)
+        raise KeyboardInterrupt
+    log("Force quit")
+    os._exit(128 + int(signum))
+
+
+def install_stop_handlers() -> None:
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _on_stop_signal)
+        except Exception:
+            pass
+
+
 def disk_free_mb(path: str = "") -> float:
     """Free megabytes on the filesystem that holds `path` (the data folder)."""
     target = path or str(_DATA_DIR)
@@ -2107,21 +2159,25 @@ def mem_available_mb() -> float:
 
 
 def adaptive_parallel_cap(wanted: int) -> int:
-    """Lower how many Chromes open from free disk and memory."""
+    """Keep the requested batch size. Only shrink if disk cannot hold the profiles."""
     want = max(1, int(wanted or 1))
     disk = disk_free_mb()
     mem = mem_available_mb()
-    by_disk = want
-    by_mem = want
+    cap = want
     if disk >= 0:
-        by_disk = max(1, int((disk - MIN_FREE_DISK_MB) / PROFILE_DISK_MB) + 1)
-    if mem >= 0:
-        by_mem = max(1, int((mem - PROFILE_RAM_RESERVE_MB) / PROFILE_RAM_MB))
-    cap = max(1, min(want, by_disk, by_mem))
+        need = MIN_FREE_DISK_MB + PROFILE_DISK_MB * max(0, want - 1)
+        if disk < need:
+            cap = max(1, int((disk - MIN_FREE_DISK_MB) / PROFILE_DISK_MB) + 1)
+            cap = min(want, cap)
     log(
-        f"Machine cap: {cap} profile(s) at once "
-        f"(asked {want}; disk {disk:.0f} MB, RAM {mem:.0f} MB free)"
+        f"Opening {cap} account(s) at a time "
+        f"(batch {want}; disk {disk:.0f} MB, RAM {mem:.0f} MB free)"
     )
+    if mem >= 0 and mem < PROFILE_RAM_RESERVE_MB + PROFILE_RAM_MB * max(0, cap - 1):
+        log(
+            f"RAM is tight ({mem:.0f} MB) — still opening {cap} this batch. "
+            "A profile that fails to start is retried later."
+        )
     return cap
 
 
@@ -2355,6 +2411,8 @@ def _throttle_api() -> None:
 
 
 def adspower_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if stop_requested():
+        raise RuntimeError("stopped")
     _throttle_api()
     url = f"{ADSPOWER_API}{path}"
     response = requests.get(
@@ -2533,17 +2591,18 @@ def account_may_post(stats: AccountSummary) -> Tuple[bool, str]:
 
 def account_may_general_comment(stats: AccountSummary) -> Tuple[bool, str]:
     _karma, age = _account_karma_age(stats)
-    if age > float(GENERAL_COMMENT_MIN_AGE_DAYS):
+    if age >= float(GENERAL_COMMENT_MIN_AGE_DAYS):
         return True, ""
     if age >= 1.0:
         return (
             False,
-            f"account is {age:.0f} days old — general comments after {GENERAL_COMMENT_MIN_AGE_DAYS} days",
+            f"account is {age:.0f} days old — general activity from "
+            f"{GENERAL_COMMENT_MIN_AGE_DAYS} days",
         )
     return (
         False,
-        "account age was not read — no general comment until it is older than "
-        f"{GENERAL_COMMENT_MIN_AGE_DAYS} days",
+        "account age was not read — no general activity until the account is "
+        f"{GENERAL_COMMENT_MIN_AGE_DAYS} days old",
     )
 
 
@@ -4541,6 +4600,8 @@ def _poll_profile_debugger(user_id: str, seconds: float = 16.0) -> Dict[str, Any
 def _start_profile_via_api(user_id: str, label: str) -> Dict[str, Any]:
     last_error: Optional[BaseException] = None
     for attempt in range(1, 4):
+        if stop_requested():
+            raise RuntimeError("stopped")
         existing = _poll_profile_debugger(user_id, seconds=2.0)
         if ((existing.get("ws") or {}).get("selenium") or "").strip():
             return existing
@@ -6777,6 +6838,8 @@ def set_session_deadline(when: Optional[float]) -> None:
 
 
 def deadline_remaining() -> Optional[float]:
+    if stop_requested():
+        return 0.0
     when = getattr(_tls, "deadline", None)
     if when is None:
         return None
@@ -6804,7 +6867,7 @@ def human_sleep(seconds: float, remaining: Optional[float] = None) -> float:
     if left is not None:
         nap = min(nap, max(0.0, left))
     if nap > 0:
-        time.sleep(nap)
+        interruptible_sleep(nap)
     return nap
 
 
@@ -8941,7 +9004,7 @@ def _account_karma_age(stats: AccountSummary) -> Tuple[int, float]:
 
 
 def account_in_warmup(stats: AccountSummary) -> bool:
-    """True until the account is older than 7 days. Then general comments are allowed."""
+    """True until the account is 4 days old. Then general activity is allowed."""
     allowed, _why = account_may_general_comment(stats)
     return not allowed
 
@@ -8949,7 +9012,7 @@ def account_in_warmup(stats: AccountSummary) -> bool:
 def warmup_reason(stats: AccountSummary) -> str:
     _allowed, why = account_may_general_comment(stats)
     return why or (
-        f"warmup — need more than {GENERAL_COMMENT_MIN_AGE_DAYS} days for a general comment"
+        f"warmup — need {GENERAL_COMMENT_MIN_AGE_DAYS} days for general activity"
     )
 
 
@@ -8983,7 +9046,7 @@ def join_if_allowed(
 
 
 def _too_new_for_general_comment(stats: AccountSummary) -> bool:
-    """True until the account is older than 7 days."""
+    """True until the account is 4 days old."""
     allowed, _why = account_may_general_comment(stats)
     return not allowed
 
@@ -9090,7 +9153,7 @@ def maybe_ai_comment_on_opened_post(
         log(f"{prefix}Comment skipped — another account already commented on this link")
         return False
     try:
-        from reddit_joiner.ai import analyze_post, generate_ai_comment, local_comment_for_post
+        from reddit_joiner.ai import analyze_post, generate_ai_comment
     except ImportError as exc:
         log(f"{prefix}Comment module missing ({exc})")
         return False
@@ -9217,10 +9280,7 @@ def maybe_ai_comment_on_opened_post(
             example=example,
         )
     except Exception as exc:
-        log(
-            f"{prefix}Comment skipped — model timed out "
-            f"({brief_error(exc)})"
-        )
+        log(f"{prefix}Comment skipped — model failed ({brief_error(exc)})")
         return False
     if len(re.findall(r"[A-Za-z]", text or "")) < 18:
         log(f"{prefix}Comment skipped — generated text was too short")
@@ -12931,6 +12991,11 @@ def process_profile(
     hops: List[str] = []
     started = False
 
+    if stop_requested():
+        stats.sitting_ok = False
+        stats.post_note = "stopped"
+        return stats
+
     try:
         begin_session_rng(user_id, label)
         _tls.batch_user_id = user_id
@@ -13351,6 +13416,9 @@ def process_profile(
         deferred_hops: set = set()
         for index, subreddit in enumerate(hops, start=1):
             remaining = session_end - time.time()
+            if stop_requested():
+                log(f"[Profile {label}] Stopping this sitting")
+                break
             if remaining < MIN_SESSION_LEFT_FOR_SUB:
                 log(f"[Profile {label}] Session time is almost up — not joining more subreddits")
                 break
@@ -13549,8 +13617,8 @@ def process_profile(
                 if first_visit and account_in_warmup(stats):
                     log(
                         f"[Profile {label}] First visit to r/{subreddit} — "
-                        "rules and join only, comment after the account is older than "
-                        f"{GENERAL_COMMENT_MIN_AGE_DAYS} days"
+                        "rules and join only, comment after the account is "
+                        f"{GENERAL_COMMENT_MIN_AGE_DAYS} days old"
                     )
                     should_comment = False
                 elif first_visit:
@@ -13722,7 +13790,9 @@ def process_profile(
                 continue
 
         leftover = session_end - time.time()
-        if leftover > MIN_LEFTOVER_HOME:
+        if stop_requested():
+            log(f"[Profile {label}] Stopped — closing this account")
+        elif leftover > MIN_LEFTOVER_HOME:
             home_seconds += hop_reddit_home(
                 driver,
                 label,
@@ -13757,7 +13827,9 @@ def process_profile(
         # Browsing is done — release the clamp so the post / comment flows below
         # keep their natural typing and review pacing.
         set_session_deadline(None)
-        if not session_post_done[0] and sheet_target:
+        if stop_requested():
+            pass
+        elif not session_post_done[0] and sheet_target:
             try:
                 extra = community_dwell_seconds(style, _rng().uniform(18.0, 36.0))
                 log(
@@ -13789,22 +13861,23 @@ def process_profile(
                 preferred_sub=(browse_list[0] if browse_list else ""),
             )
 
-        maybe_leave_weekly_comments(
+        if not stop_requested():
+            maybe_leave_weekly_comments(
                     driver,
                     label,
                     user_id,
                     stats,
                     serial=serial,
                 )
-        if stats.comments < stats.session_comment_target:
-            maybe_karma_growth_comments(
-                driver,
-                label,
-                user_id,
-                stats,
-                session_subs=browse_list or allowed_subreddits(),
-                time_budget=max(45.0, community_budget - community_seconds),
-            )
+            if stats.comments < stats.session_comment_target:
+                maybe_karma_growth_comments(
+                    driver,
+                    label,
+                    user_id,
+                    stats,
+                    session_subs=browse_list or allowed_subreddits(),
+                    time_budget=max(45.0, community_budget - community_seconds),
+                )
     except Exception as exc:
         log(f"[Profile {label}] FAILED — {brief_error(exc)}")
         if not started:
@@ -13850,9 +13923,18 @@ def _launch_profile_wave(
     retry: bool = False,
 ) -> List[AccountSummary]:
     """Open one wave of accounts. A failed start is not a finished sitting."""
+    def _stopped_summary(profile: Dict[str, str]) -> AccountSummary:
+        label = profile.get("name") or profile["user_id"]
+        failed = AccountSummary(name=label, user_id=profile["user_id"])
+        failed.sitting_ok = False
+        failed.post_note = "stopped"
+        return failed
+
     if not PARALLEL_PROFILES or len(targets) <= 1:
         reports: List[AccountSummary] = []
         for index, profile in enumerate(targets):
+            if stop_requested():
+                break
             sch = schedules.get(profile["user_id"]) or {}
             label = profile.get("name") or profile["user_id"]
             delay = 0.0 if retry else float(sch.get("start_delay") or 0)
@@ -13863,7 +13945,9 @@ def _launch_profile_wave(
             )
             if delay > 1:
                 log(f"[Profile {label}] Waiting {delay / 60:.1f} min before opening")
-                time.sleep(delay)
+                interruptible_sleep(delay)
+            if stop_requested():
+                break
             reports.append(
                 process_profile(
                     profile,
@@ -13872,9 +13956,11 @@ def _launch_profile_wave(
                 )
             )
             if index < len(targets) - 1:
+                if stop_requested():
+                    break
                 gap = _rng().uniform(*DELAY_BETWEEN_PROFILES)
                 log(f"Waiting {gap:.1f}s before the next profile")
-                time.sleep(gap)
+                interruptible_sleep(gap)
         return reports
 
     cap = max(1, min(int(workers), len(targets)))
@@ -13886,13 +13972,20 @@ def _launch_profile_wave(
 
     def worker(index: int, profile: Dict[str, str]) -> None:
         label = profile.get("name") or profile["user_id"]
+        if stop_requested():
+            slots[index] = _stopped_summary(profile)
+            return
         sch = schedules.get(profile["user_id"]) or {}
         delay = 0.0 if retry else float(sch.get("start_delay") or 0)
         log("-" * 56)
         log(f"Profile {label}: {index + 1}/{len(targets)} queued")
         if delay > 1:
             log(f"[Profile {label}] Assigned start in {delay / 60:.1f} min — waiting")
-            time.sleep(delay)
+            interruptible_sleep(delay)
+        if stop_requested():
+            log(f"[Profile {label}] Stopped before opening")
+            slots[index] = _stopped_summary(profile)
+            return
         log(f"Profile {label}: starting now")
         try:
             slots[index] = process_profile(
@@ -13909,12 +14002,26 @@ def _launch_profile_wave(
 
     with ThreadPoolExecutor(max_workers=cap) as pool:
         futures = []
-        for index, profile in enumerate(targets):
-            futures.append(pool.submit(worker, index, profile))
-            if index < len(targets) - 1:
-                time.sleep(_rng().uniform(1.6, 4.2))
-        for future in as_completed(futures):
-            future.result()
+        try:
+            for index, profile in enumerate(targets):
+                if stop_requested():
+                    break
+                futures.append(pool.submit(worker, index, profile))
+                if index < len(targets) - 1:
+                    interruptible_sleep(_rng().uniform(1.6, 4.2))
+            for future in as_completed(futures):
+                if stop_requested():
+                    for item in futures:
+                        item.cancel()
+                    break
+                try:
+                    future.result()
+                except CancelledError:
+                    pass
+        except KeyboardInterrupt:
+            request_stop("Ctrl+C")
+            for item in futures:
+                item.cancel()
     return [item for item in slots if item is not None]
 
 
@@ -13940,10 +14047,12 @@ def run_profiles(
     retry_profiles = [
         profile
         for profile in targets
-        if by_id.get(profile["user_id"]) is not None
+        if not stop_requested()
+        and by_id.get(profile["user_id"]) is not None
         and not getattr(by_id[profile["user_id"]], "sitting_ok", True)
+        and str(getattr(by_id[profile["user_id"]], "post_note", "") or "") != "stopped"
     ]
-    if retry_profiles:
+    if retry_profiles and not stop_requested():
         log(
             f"Retrying {len(retry_profiles)} profile(s) that failed to start — "
             "those first attempts are not finished sittings"
@@ -13962,6 +14071,7 @@ def run_profiles(
 
 def main() -> int:
     global PROFILE_IDS, SUBREDDITS, SUBREDDITS_TO_BROWSE
+    install_stop_handlers()
     disk_error = require_disk_space()
     if disk_error:
         log(disk_error)
@@ -14033,6 +14143,7 @@ def main() -> int:
             )
             set_agent(agent)
             agent.install_handlers()
+            install_stop_handlers()
             # Epsilon used to be forced back to 0.22 here on every run, which
             # threw away the decay schedule and kept a fifth of all actions
             # random forever. Exploration is now handled by the UCB bonus, which
@@ -14107,7 +14218,7 @@ def main() -> int:
         ):
             log(
                 "Ollama is not available — start Ollama (`ollama pull mistral:7b`) "
-                "or add a cloud API key. Comments will otherwise use a local fallback."
+                "or add a cloud API key. Comments are skipped if the model fails."
             )
     ensure_posts_sheet()
     pending = count_pending_posts()
@@ -14128,7 +14239,7 @@ def main() -> int:
             f"{COMMENTS_PER_WINDOW} comments/{ACTION_WINDOW_HOURS:.0f}h, "
             f"{POSTS_PER_WINDOW} post/{ACTION_WINDOW_HOURS:.0f}h "
             f"(sheets first, then general; karma > {WARMUP_MIN_KARMA} to post, "
-            f"age > {GENERAL_COMMENT_MIN_AGE_DAYS}d to comment)"
+            f"age >= {GENERAL_COMMENT_MIN_AGE_DAYS}d for general activity)"
         )
     log(
         f"Each sitting is a new random mix: {SESSION_SECONDS_RANGE[0] // 60}–"
@@ -14174,7 +14285,11 @@ def main() -> int:
         log(f"Assigned {assigned} comments.csv link(s) to accounts")
     print_comments_sheet_status()
 
-    reports = run_profiles(targets, SUBREDDITS)
+    reports: List[AccountSummary] = []
+    try:
+        reports = run_profiles(targets, SUBREDDITS)
+    except KeyboardInterrupt:
+        request_stop("Ctrl+C")
 
     if RL_ENABLED and _rl_agent() is not None:
         try:
@@ -14218,7 +14333,7 @@ def main() -> int:
             )
         except Exception as exc:
             log(f"Could not save RL model ({brief_error(exc)})")
-    log("All profiles processed")
+    log("Stopped" if stop_requested() else "All profiles processed")
     return 0
 
 

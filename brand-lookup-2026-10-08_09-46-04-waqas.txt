@@ -1,0 +1,313 @@
+==============================================================================
+BRAND LOOKUP (only checker browsers opened — brand accounts never)
+==============================================================================
+Generated:   2026-10-08T09:46:04.952Z
+Input:       IDs from C:\Users\Administrator\Documents\GitHub\Botter\data\brand-lookup\waqas.txt (247)
+Duration:    6m 41s
+Checkers:    k1hfml6l, k1hfml6o, k1hfml6q, k1hfml6r, k1hfml6s, k1hfmlfn, k1hfmlfo, k1hfmlfr, k1hfmlfu, k1hfmnq4, k1hfmnq5, k1hfmnq6, k1hfmnq9, k1hfmnqd, k1hfmnqe, k1hfmnqi, k1hfmnqm, k1hfmnqn, k1hfmnqu
+Method:      logged-in checker browsers read /user/<name>/about.json (public data).
+             LIVE = visible to other users. BANNED = "not found" to other users
+             (banned or shadowbanned). SUSPENDED = Reddit marks the account suspended.
+
+SUMMARY
+------------------------------------------------------------------------------
+Accounts found:                247
+  LIVE:                        102
+  BANNED (not found):          138
+  SUSPENDED:                   7
+  Lookup failed:               0
+  Missing username:            0
+
+LIVE — 102
+------------------------------------------------------------------------------
+  k1hfml2d  @ClearPlaktmyleon2112      LIVE          karma=4 (post 1 / comment 3)  age=8 d (8 d)  cake-day=2026-09-30  
+  k1hfml28  @Fit-Film-264misti1        LIVE          karma=2 (post 1 / comment 1)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml2p  @Cautiou_Bfurell_9807      LIVE          karma=2 (post 1 / comment 1)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml4o  @OkFimortimerg873          LIVE          karma=2 (post 1 / comment 1)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml5p  @Curent-Sir-65hanna70      LIVE          karma=2 (post 1 / comment 1)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfmkre  @Thin-Boybuiloder-492      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmkrp  @Charjulmin_Ease_7762      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmkuf  @OkStdy293terrell3         LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmkuv  @Glitterinag-Stck-147      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmkve  @ConlsideratinTop2074      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmkw0  @AudienecEmergency251      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmkw6  @Wintenicolr_oal_9493      LIVE          karma=1 (post 1 / comment 0)  age=5 d (5 d)  cake-day=2026-10-02  
+  k1hfmkyb  @OmalachikTear_4960        LIVE          karma=1 (post 1 / comment 0)  age=5 d (5 d)  cake-day=2026-10-02  
+  k1hfmkyk  @Evearleaney_Yard1377      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmkyu  @SaltIntrodmucton9751      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmkyw  @NeeheleworkerNew7805      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml03  @Zestyclos_kBerry7458      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml08  @ConsistenttMine-8147      LIVE          karma=1 (post 1 / comment 0)  age=8 d (8 d)  cake-day=2026-09-30  
+  k1hfml0f  @UnlukyjannettFig4020      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml0o  @Specilistl-Debate716      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml1m  @Fearlss-Crenaow-9342      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml2x  @Sufmfcient_Guitar634      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml32  @Disastrocs_Alarm2753      LIVE          karma=1 (post 1 / comment 0)  age=8 d (8 d)  cake-day=2026-09-30  
+  k1hfml3g  @Plane-Lterjature8022      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml44  @Time_Morncresng_9441      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml4m  @ExpertAasctivity1710      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml51  @Entre-Watemurcress85      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfml5o  @No_napoleMagaine3920      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfml5w  @Jazzlcoike-Recrd7699      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfml5x  @Loannettew-Cd1171         LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml62  @Accodingorr_Net_2236      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml6v  @Coolc_Sgnificance587      LIVE          karma=1 (post 1 / comment 0)  age=5 d (5 d)  cake-day=2026-10-02  
+  k1hfml7e  @Diffiult_Bbasis_2071      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfml8d  @Alterbntive-City9922      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfml8k  @Local_ig_kerwin5654       LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfml9b  @Mmaeajestic-orld9238      LIVE          karma=1 (post 1 / comment 0)  age=5 d (5 d)  cake-day=2026-10-02  
+  k1hfml9r  @Prestiglious-ut-6102      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlap  @Fit-Band-9amparo13        LIVE          karma=1 (post 1 / comment 0)  age=5 d (5 d)  cake-day=2026-10-02  
+  k1hfmlbb  @Rearkelable-Cut-2458      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfmlca  @Aslecp_Election_8194      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfmlcf  @Complex-Hihslight771      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfmlcp  @Avaialable-Fiding358      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfmlcv  @PumazzleheaedSafe326      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-09-30  
+  k1hfmlf7  @Infomal_Unitkathe643      LIVE          karma=1 (post 1 / comment 0)  age=7 d (7 d)  cake-day=2026-10-01  
+  k1hfmlfb  @Vegetaborve_Fly_2626      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlff  @Traitiongal-Truth723      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlg8  @Ordinary-Oabrer-8070      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlg9  @Letogitimte-Rest6084      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlgb  @Elkomprehesnsive2312      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlgd  @Impressie-Tlaime4647      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlgl  @Odleiad-Wrap112           LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlgp  @Stronglyndse_Kwi5429      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlgw  @Objectivadrae_Be7055      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlh2  @Availabl-Lemelon8808      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlh4  @Eveingb_Guidance_584      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlh6  @Backgrond-mTrack-797      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlha  @Replsive_Tesydrm_995      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlhe  @Confident_omver_7014      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlhh  @OkGangusoat-3588          LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlhm  @AffectioniteTheme538      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlho  @Ok-Discilizigmne8158      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlhx  @Imagimnar_Spell_5951      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlhy  @Main-Lnagthiness-985      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmli4  @Chance-Bu8gerda878        LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmli7  @Afaid-Arjuniaea-6368      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmli8  @Alagrmin_Highway3182      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlic  @Most_Cow20angella46       LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlid  @Visul_Gapgloria3585       LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlii  @CashWaste3brennan27       LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlim  @Brilliantlcyrane5984      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlin  @Spirite_Capryker7144      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlip  @Vivid-diaRutabaa9841      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlis  @Reasonjefale_Let2025      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlit  @Ok-Crnoveanbery-7264      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlj1  @Long-Reenuetall-7104      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmlj7  @WinterMotomontrr3207      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-01  
+  k1hfmljc  @DuyCderickomplex7094      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmljd  @RareFiclaribenger391      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmljf  @Faquiiliar_Pride1431      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmljh  @Qiet-Performwer-3167      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmljk  @SigificcantCicada714      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmljy  @Stunndin_Counter_114      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlk1  @PenltylannieFun3304       LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlk4  @Strong_Rfespnse_7158      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlk5  @GuiltikeyJicama659        LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlk8  @Upstais_Cojaseld7521      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlkb  @Fabhulous-nxiety-210      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlkf  @Fedeal-Coonfection96      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlkg  @Alarmed-Ntlural-5937      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlkk  @Pupennitrid_ock_2705      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlky  @Excelcalent-nion8112      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmll2  @OwnMusic-4leah370         LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmll3  @Seleclt_Dimesion_320      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmll6  @Most_darciGene_771        LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlla  @Adorable-Slctor-7088      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmllb  @Gold-rounjillid-3653      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlld  @UnittedViolinist-360      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlm5  @ConsciousmorJob-4834      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlma  @Medicahl_isplay_4682      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlok  @Top_Tak_215pamelia0       LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlol  @Altruistic-ollmar503      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+  k1hfmlos  @Glozmy_Effective_187      LIVE          karma=1 (post 1 / comment 0)  age=6 d (6 d)  cake-day=2026-10-02  
+
+LIVE IDs — 102
+------------------------------------------------------------------------------
+  k1hfml2d,k1hfml28,k1hfml2p,k1hfml4o,k1hfml5p,k1hfmkre,k1hfmkrp,k1hfmkuf,k1hfmkuv,k1hfmkve,k1hfmkw0,k1hfmkw6,k1hfmkyb,k1hfmkyk,k1hfmkyu,k1hfmkyw,k1hfml03,k1hfml08,k1hfml0f,k1hfml0o,k1hfml1m,k1hfml2x,k1hfml32,k1hfml3g,k1hfml44,k1hfml4m,k1hfml51,k1hfml5o,k1hfml5w,k1hfml5x,k1hfml62,k1hfml6v,k1hfml7e,k1hfml8d,k1hfml8k,k1hfml9b,k1hfml9r,k1hfmlap,k1hfmlbb,k1hfmlca,k1hfmlcf,k1hfmlcp,k1hfmlcv,k1hfmlf7,k1hfmlfb,k1hfmlff,k1hfmlg8,k1hfmlg9,k1hfmlgb,k1hfmlgd,k1hfmlgl,k1hfmlgp,k1hfmlgw,k1hfmlh2,k1hfmlh4,k1hfmlh6,k1hfmlha,k1hfmlhe,k1hfmlhh,k1hfmlhm,k1hfmlho,k1hfmlhx,k1hfmlhy,k1hfmli4,k1hfmli7,k1hfmli8,k1hfmlic,k1hfmlid,k1hfmlii,k1hfmlim,k1hfmlin,k1hfmlip,k1hfmlis,k1hfmlit,k1hfmlj1,k1hfmlj7,k1hfmljc,k1hfmljd,k1hfmljf,k1hfmljh,k1hfmljk,k1hfmljy,k1hfmlk1,k1hfmlk4,k1hfmlk5,k1hfmlk8,k1hfmlkb,k1hfmlkf,k1hfmlkg,k1hfmlkk,k1hfmlky,k1hfmll2,k1hfmll3,k1hfmll6,k1hfmlla,k1hfmllb,k1hfmlld,k1hfmlm5,k1hfmlma,k1hfmlok,k1hfmlol,k1hfmlos
+
+BANNED — not found by other users (banned / shadowbanned) — 138
+------------------------------------------------------------------------------
+  k1hfmkqw  @Caelrosaless_Dirt_15  *  
+  k1hfmkqy  @CatIcalndiviual8959  *  
+  k1hfmkr7  @Weak-Yghskylarurt353  *  
+  k1hfmkr9  @Suffilawcient_un3489  *  
+  k1hfmkrc  @EitherVclemideo-8669  *  
+  k1hfmkrh  @Swaty_Musgahroom7059  *  
+  k1hfmkrs  @Agreeble-Mogrnk-8748  *  
+  k1hfmks4  @Single_olid_chyn3197  *  
+  k1hfmkse  @AffecdatioateLow9722  *  
+  k1hfmksx  @Interesting-hSlf6372  *  
+  k1hfmktj  @Topheaven-Bowlr7695  *  
+  k1hfmktm  @DillucigentHotel6977  *  
+  k1hfmktp  @Agrereabl-Worry-7193  *  
+  k1hfmktt  @GlooyjBodybuilder885  *  
+  k1hfmkuo  @FinanhenceCarful7987  *  
+  k1hfmkv6  @LowFishjudsoeran3265  *  
+  k1hfmkv8  @ResponnnsibleTruth62  *  
+  k1hfmkvu  @AdvanaglieExpress639  *  
+  k1hfmkwe  @Purpl-Fahalult3343  *  
+  k1hfmkwm  @Ralilldiant_Cree2800  *  
+  k1hfmkwp  @Pale_Catadejuin_4949  *  
+  k1hfmkx6  @WrongMiritcnute_6469  *  
+  k1hfmkxa  @Exomtc-Commission733  *  
+  k1hfmkxl  @Conagnstant_eply_191  *  
+  k1hfmky4  @Fantaastic-Prase-550  *  
+  k1hfmky5  @Falsechani-Voce-3177  *  
+  k1hfmkyo  @Grjuliouchy-Snse1634  *  
+  k1hfmkyq  @WaeleanorrmCst2037  *  
+  k1hfml0k  @Innersu_Swodfish_900  *  
+  k1hfml14  @MayeInformamagdl3427  *  
+  k1hfml1q  @Health-Sectjudor1017  *  
+  k1hfml1u  @Flimsy_Prubrogrm7158  *  
+  k1hfml1x  @Visul-String-syl4439  *  
+  k1hfml1y  @FilmWekly70zollie25  *  
+  k1hfml24  @Gonld-Instrution4358  *  
+  k1hfml2b  @ReivaqurementFew1487  *  
+  k1hfml2e  @Master_Mualisle_3255  *  
+  k1hfml2s  @Fuknny-Sructure-8456  *  
+  k1hfml31  @Frijendly-Pessure826  *  
+  k1hfml34  @Kooviky-Meicine-4730  *  
+  k1hfml35  @Kind-Perforcmnce6905  *  
+  k1hfml3j  @Norquml_Charity_8168  *  
+  k1hfml3m  @LowerkimoraIncom8255  *  
+  k1hfml3q  @Signal_Cponfience229  *  
+  k1hfml3r  @Electricl_orWeb_3258  *  
+  k1hfml3s  @Extrme-Sjuccotash452  *  
+  k1hfml41  @OkSpantonring467  *  
+  k1hfml4b  @Enkandiouh_Pie7749  *  
+  k1hfml4f  @Elcmtrical-Beat-5847  *  
+  k1hfml4v  @Due-Comaurptition373  *  
+  k1hfml53  @Chjaracte-Tadpole112  *  
+  k1hfml54  @Silver_orkecamr_7898  *  
+  k1hfml55  @Feeling-Piesszza1910  *  
+  k1hfml56  @Superb-Acicelyd9831  *  
+  k1hfml5a  @No_Pcarlyrofesso1271  *  
+  k1hfml5d  @BoxedriConsisent2741  *  
+  k1hfml5e  @PleasantPanibalay863  *  
+  k1hfml5u  @Wide_Rgenesisace3926  *  
+  k1hfml63  @Competitive-Bid-6315  *  
+  k1hfml6i  @Born_Tyvonneain_8719  *  
+  k1hfml6p  @Maskaesive_Jude_7588  *  
+  k1hfml70  @Event-Backgound-6492  *  
+  k1hfml80  @Nearby-aHegehog-2542  *  
+  k1hfml82  @Middleferdinan_To_74  *  
+  k1hfml8i  @Present-Tiegwynet552  *  
+  k1hfml8m  @Flaky-Qartersha-3399  *  
+  k1hfml8r  @Nopao-Informatin6712  *  
+  k1hfml8s  @Limp-rongdgeoer-1741  *  
+  k1hfml8v  @StatisticiaLjost5267  *  
+  k1hfml8x  @WesgoldenernRock4678  *  
+  k1hfml90  @OddMinighmarit80  *  
+  k1hfml95  @Budgt_Enlvironment61  *  
+  k1hfml9q  @Agrebeeble_Serve_463  *  
+  k1hfml9w  @Limp-bBtterscotch827  *  
+  k1hfmlad  @AggravatinemgSup9859  *  
+  k1hfmlb5  @Meldicenriqu-Net-639  *  
+  k1hfmlb8  @AdMued83jarrell43  *  
+  k1hfmlbw  @Awwarburd-Curve-8647  *  
+  k1hfmlck  @InterestinchgRun3610  *  
+  k1hfmlcy  @Genoteal-Arugula1284  *  
+  k1hfmld5  @Imaginar_Poalint5426  *  
+  k1hfmldo  @Grouch-Okeeleyne86  *  
+  k1hfmlds  @Grea_Tnilesrust4956  *  
+  k1hfmldy  @BittrAd6124sheron  *  
+  k1hfmle0  @Declicious_Cyote_539  *  
+  k1hfmle2  @EconomPrrofession961  *  
+  k1hfmle6  @ToughChartogapher853  *  
+  k1hfmle9  @Proud_tyle2otelia026  *  
+  k1hfmlei  @Wagar-Somewhere-4436  *  
+  k1hfmlet  @Think-Siraavigs-5484  *  
+  k1hfmlfj  @AdminvancedSand_1377  *  
+  k1hfmlfv  @Ok-Reflluciectio-372  *  
+  k1hfmlfy  @Neithevr_Matrial_227  *  
+  k1hfmlg1  @Evening_lumebird_112  *  
+  k1hfmlg2  @Immkeiate_Wasabi9566  *  
+  k1hfmlg5  @DesigtnerAutoatic381  *  
+  k1hfmlgm  @Collarrykossible8949  *  
+  k1hfmlgq  @Infrmalcl-Farmer5095  *  
+  k1hfmlgs  @AntCheical3aleen216  *  
+  k1hfmlgt  @AudienrcSuitable9280  *  
+  k1hfmlh1  @NearbyGodeberaod4845  *  
+  k1hfmlh3  @Loalethawun4807  *  
+  k1hfmlh5  @Low-janetSleep-842  *  
+  k1hfmlh8  @DealVivid70misael9  *  
+  k1hfmlhc  @HopefulPcolyment7283  *  
+  k1hfmlhi  @RelevannatTrifle8499  *  
+  k1hfmlhk  @Actul-Bothelakr-8570  *  
+  k1hfmlhr  @Eletrokanic-Tax-8397  *  
+  k1hfmli1  @BeinningButenyer6033  *  
+  k1hfmli3  @Curious_Epmlorer1293  *  
+  k1hfmli9  @Advnturous-hCod-9112  *  
+  k1hfmlia  @Profesiodnal-Mud8406  *  
+  k1hfmlib  @Difficzult_Cheical57  *  
+  k1hfmlig  @Poskrisible-Muic3655  *  
+  k1hfmlij  @Lockorldly69harmon1  *  
+  k1hfmlik  @UnliklyRecgeption141  *  
+  k1hfmlio  @Accodingig-Bake-6823  *  
+  k1hfmlir  @Icy-Reputbuaion-2954  *  
+  k1hfmliu  @Fickllilie_Offie3530  *  
+  k1hfmliw  @ParticularEximar1946  *  
+  k1hfmliy  @InterestigthePin8253  *  
+  k1hfmlj2  @LazyRendeewylier2022  *  
+  k1hfmlj6  @Fit-Atichoke-char308  *  
+  k1hfmlj8  @Ok_Sock_371west2  *  
+  k1hfmljm  @Unablaleshae_Dit5219  *  
+  k1hfmlju  @Successul-gaPick2134  *  
+  k1hfmlk2  @LaderCabeonstant1468  *  
+  k1hfmlkr  @AnyCcortneyut49  *  
+  k1hfmlkv  @Nojaxon-Drft-6576  *  
+  k1hfmllc  @Dismalhandy-ie1541  *  
+  k1hfmlle  @JadedVekternarian323  *  
+  k1hfmllo  @StvatisicianFlat2327  *  
+  k1hfmllq  @Signa-Disctussion610  *  
+  k1hfmlme  @Repuclsiv_Heron_6052  *  
+  k1hfmlmh  @Cute-Aazzwaeness9615  *  
+  k1hfmlmi  @FarAi3004bertrand  *  
+  k1hfmlmp  @Long-dafnarnacle6148  *  
+  k1hfmloq  @Ok-Bluebsharifrd-363  *  
+  * username comes from the AdsPower profile name only (never confirmed by a browser run)
+    — "not found" can also mean the AdsPower name is not the real Reddit username.
+  IDs: k1hfmkqw,k1hfmkqy,k1hfmkr7,k1hfmkr9,k1hfmkrc,k1hfmkrh,k1hfmkrs,k1hfmks4,k1hfmkse,k1hfmksx,k1hfmktj,k1hfmktm,k1hfmktp,k1hfmktt,k1hfmkuo,k1hfmkv6,k1hfmkv8,k1hfmkvu,k1hfmkwe,k1hfmkwm,k1hfmkwp,k1hfmkx6,k1hfmkxa,k1hfmkxl,k1hfmky4,k1hfmky5,k1hfmkyo,k1hfmkyq,k1hfml0k,k1hfml14,k1hfml1q,k1hfml1u,k1hfml1x,k1hfml1y,k1hfml24,k1hfml2b,k1hfml2e,k1hfml2s,k1hfml31,k1hfml34,k1hfml35,k1hfml3j,k1hfml3m,k1hfml3q,k1hfml3r,k1hfml3s,k1hfml41,k1hfml4b,k1hfml4f,k1hfml4v,k1hfml53,k1hfml54,k1hfml55,k1hfml56,k1hfml5a,k1hfml5d,k1hfml5e,k1hfml5u,k1hfml63,k1hfml6i,k1hfml6p,k1hfml70,k1hfml80,k1hfml82,k1hfml8i,k1hfml8m,k1hfml8r,k1hfml8s,k1hfml8v,k1hfml8x,k1hfml90,k1hfml95,k1hfml9q,k1hfml9w,k1hfmlad,k1hfmlb5,k1hfmlb8,k1hfmlbw,k1hfmlck,k1hfmlcy,k1hfmld5,k1hfmldo,k1hfmlds,k1hfmldy,k1hfmle0,k1hfmle2,k1hfmle6,k1hfmle9,k1hfmlei,k1hfmlet,k1hfmlfj,k1hfmlfv,k1hfmlfy,k1hfmlg1,k1hfmlg2,k1hfmlg5,k1hfmlgm,k1hfmlgq,k1hfmlgs,k1hfmlgt,k1hfmlh1,k1hfmlh3,k1hfmlh5,k1hfmlh8,k1hfmlhc,k1hfmlhi,k1hfmlhk,k1hfmlhr,k1hfmli1,k1hfmli3,k1hfmli9,k1hfmlia,k1hfmlib,k1hfmlig,k1hfmlij,k1hfmlik,k1hfmlio,k1hfmlir,k1hfmliu,k1hfmliw,k1hfmliy,k1hfmlj2,k1hfmlj6,k1hfmlj8,k1hfmljm,k1hfmlju,k1hfmlk2,k1hfmlkr,k1hfmlkv,k1hfmllc,k1hfmlle,k1hfmllo,k1hfmllq,k1hfmlme,k1hfmlmh,k1hfmlmi,k1hfmlmp,k1hfmloq
+
+SUSPENDED — 7
+------------------------------------------------------------------------------
+  k1hfmksr  @Flash-Adeudress-8138  
+  k1hfml4i  @BahRespsionsible8198  
+  k1hfml6c  @Quasy-jBeautiful-214  
+  k1hfmlas  @Conciouks-Physics102  
+  k1hfmlcr  @Spiritual_Pvoelo_538  
+  k1hfmldr  @Working_Chshanel8385  
+  k1hfmle3  @Few-Watecreprss-5708  
+  IDs: k1hfmksr,k1hfml4i,k1hfml6c,k1hfmlas,k1hfmlcr,k1hfmldr,k1hfmle3
+
+LOOKUP FAILED — status unknown, re-run these — 0
+------------------------------------------------------------------------------
+  IDs: (none)
+
+MISSING USERNAME — not looked up (use the browser pipeline for these) — 0
+------------------------------------------------------------------------------
+  IDs: (none)
+
+CHECKERS
+------------------------------------------------------------------------------
+  k1hfml6l  not logged in / unknown    lookups=0     stopped: reddit.com did not load after 4 attempts (page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://www.reddit.com/)
+  k1hfml6o  @Amazig-Weeekend-4953      lookups=36    ok
+  k1hfml6q  @Quiet_Paiabience9248      lookups=34    ok
+  k1hfml6r  @Certain-Stdayle-3116      lookups=34    ok
+  k1hfml6s  @Autozamatc_Point_412      lookups=27    ok
+  k1hfmlfn  @Honort_Resaurant5592      lookups=28    ok
+  k1hfmlfo  @AspectAcroatevic8113      lookups=21    ok
+  k1hfmlfr  @SecretAmddition_5917      lookups=21    ok
+  k1hfmlfu  @Any-Perspivetive7645      lookups=16    ok
+  k1hfmnq4  @Ambitioucl-Debate415      lookups=14    ok
+  k1hfmnq5  @Dontowcn-Treacle5117      lookups=9     ok
+  k1hfmnq6  @Receurn_Chemical1931      lookups=6     ok
+  k1hfmnq9  @Ambdyaitius_Pick9490      lookups=1     ok
+  k1hfmnqd  @OkCattjaylanle580         lookups=0     ok
+  k1hfmnqe  not logged in / unknown    lookups=0     stopped: not needed (queue finished first)
+  k1hfmnqi  not logged in / unknown    lookups=0     stopped: not needed (queue finished first)
+  k1hfmnqm  not logged in / unknown    lookups=0     stopped: not needed (queue finished first)
+  k1hfmnqn  not logged in / unknown    lookups=0     stopped: not needed (queue finished first)
+  k1hfmnqu  not logged in / unknown    lookups=0     stopped: not needed (queue finished first)

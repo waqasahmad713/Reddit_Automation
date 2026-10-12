@@ -285,11 +285,15 @@ def _clean_comment(text: str) -> str:
     value = _strip_comment_chars(value)
     value = _expand_contractions(value)
     parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", value) if part.strip()]
-    if len(parts) > 2:
-        value = " ".join(parts[:2]).strip()
+    if not parts:
+        return ""
+    two = f"{parts[0]} {parts[1]}".strip() if len(parts) >= 2 else parts[0]
+    if len(parts) >= 2 and len(two) <= 180:
+        value = two
     else:
-        value = " ".join(parts).strip()
-    value = value[:300].strip()
+        value = parts[0]
+    if len(value) > 180:
+        return ""
     letters = len(re.findall(r"[A-Za-z]", value))
     if letters < 18:
         return ""
@@ -356,6 +360,19 @@ _AUTOMATION_TELLS = (
     r"\{\{?\s*(?:topic|title|subreddit|body|hook)\s*\}?\}",
     r"^\s*(?:comment|reply|response)\s*:\s",
     r"```",
+    r"\bi sound\b",
+    r"\bthat sounds(?: like)?\b",
+    r"\bas someone who\b",
+    r"\bin my humble opinion\b",
+    r"\bjust my two cents\b",
+    r"\bhope this helps\b",
+    r"\bi hear you\b",
+    r"\bit is important to note\b",
+    r"\bi would argue\b",
+    r"\bas an avid\b",
+    r"\blet me be honest\b",
+    r"\bnot gonna lie\b",
+    r"\bi cannot stress (?:this|enough)\b",
 )
 _AUTOMATION_RE = re.compile("|".join(_AUTOMATION_TELLS), re.I)
 
@@ -977,26 +994,30 @@ def generate_ai_comment(
     prompt = (
         f"Write one Reddit comment for {place}, as if you typed it on your phone. "
         f"{tone_line} {mood_line} {intent_line}{rule_line}{example_line}{phrase_line} "
-        "One sentence is enough when the point is clear. Two is the most. Do not pad. "
+        "One short line is enough. Stay under 140 characters. Two sentences only if both still fit. "
+        "Do not pad. Do not narrate yourself. "
+        "Do not write I sound, that sounds, as someone who, in my humble opinion, "
+        "just my two cents, hope this helps, I hear you, or it is important to note. "
         "Do not end with a question every time. Only ask if you actually need an answer. "
         'Write full words. Do not use contractions. Write "I have" not "I\'ve", '
         '"do not" not "don\'t", "I would" not "I\'d", "it is" not "it\'s". '
         "Keep commas, apostrophes, and question marks if you need them. "
         "Do not wrap the whole comment in quotes. No hashtags, no asterisks, no username, "
         "no asking for upvotes. "
-        "Do not say great post, thanks for sharing, nice write-up, or hope this helps.\n\n"
+        "Do not say great post, thanks for sharing, or nice write-up.\n\n"
         f"Title: {title}\n\n{(body or '')[:1200]}"
     )
     system = (
         "You write short Reddit comments that sound like a person typed them. "
-        "Stay in the given tone. Follow the community rules if they were given. "
+        "One short line. No self-narration. Stay in the given tone. "
+        "Follow the community rules if they were given. "
         "Never mention being a bot, karma, or that the account is new."
     )
     try:
         text, provider = _llm_text(
             prompt,
             system,
-            max_tokens=160,
+            max_tokens=90,
             fast=True,
             prefer="openai",
             timeout=COMMENT_MODEL_TIMEOUT,

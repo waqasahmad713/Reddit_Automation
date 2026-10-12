@@ -4,7 +4,7 @@ Automate human-like Reddit browsing, AI comments, and spreadsheet posts
 across AdsPower profiles.
 
 Step 1 — Launch AdsPower profile (Start API + Selenium debuggerAddress)
-Step 2 — 5–10 min human activity: Home first, then sub → Home hops.
+Step 2 — 6–15 min human activity: Home first, then sub → Home hops.
          1 post + 2 comments / 48h. Bouncy scroll; skip image/video.
 Step 3 — 2 general comments on new posts or comments.csv links.
 Step 4 — Account summary (AI comments, upvotes, live posts)
@@ -33,12 +33,13 @@ import threading
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote_plus, urlparse
 
 from reddit_joiner import human
+from reddit_joiner import warmup as warmup_ladder
 from reddit_joiner.paths import (
     ACCOUNTS_SHEET as _ACCOUNTS_SHEET,
     COMMENT_LOG_PATH as _COMMENT_LOG_PATH,
@@ -49,6 +50,7 @@ from reddit_joiner.paths import (
     POST_LOG_PATH as _POST_LOG_PATH,
     POSTS_SHEET as _POSTS_SHEET,
     POST_TEMPLATES_DIR as _POST_TEMPLATES_DIR,
+    PROJECT_ROOT as _PROJECT_ROOT,
     PROFILE_CACHE_PATH as _PROFILE_CACHE_PATH,
     PROFILES_FILE as _PROFILES_FILE,
     RL_MODEL_FILE as _RL_MODEL_FILE,
@@ -100,156 +102,23 @@ except ImportError:
 
 # AdsPower profiles to open (user_id, profile name, or serial).
 # Prefer profiles.txt (one id per line). All listed accounts run in parallel.
-_DEFAULT_PROFILE_IDS: List[str] = [
-    "k1g5mjmi",
-    "k1g5mjmh",
-]
+from reddit_joiner.sheets import (  # noqa: E402
+    ACCOUNTS_SHEET,
+    ACCOUNTS_SHEET_FIELDS,
+    SUBREDDITS_SHEET,
+    SUBREDDITS_SHEET_FIELDS,
+    apply_dead_status_to_accounts_sheet,
+    disable_account_in_sheet,
+    ensure_accounts_sheet,
+    ensure_subreddits_sheet,
+    load_account_ids_from_sheet,
+    load_browse_subreddits,
+    load_outside_lookup_reports,
+    load_profile_ids,
+    persist_inside_ban,
+)
+
 PROFILES_FILE = str(_PROFILES_FILE)
-ACCOUNTS_SHEET = str(_ACCOUNTS_SHEET)
-SUBREDDITS_SHEET = str(_SUBREDDITS_SHEET)
-ACCOUNTS_SHEET_FIELDS = ["user_id", "enabled", "name", "notes"]
-SUBREDDITS_SHEET_FIELDS = ["subreddit", "enabled", "notes"]
-
-
-def _cell_enabled(value: str) -> bool:
-    return str(value or "yes").strip().lower() not in {
-        "",
-        "0",
-        "no",
-        "n",
-        "false",
-        "off",
-        "skip",
-        "disabled",
-    }
-
-
-def _read_simple_csv(path: str, fieldnames: List[str]) -> Tuple[List[str], List[Dict[str, str]]]:
-    if not os.path.isfile(path):
-        return list(fieldnames), []
-    with open(path, encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        headers = list(reader.fieldnames or fieldnames)
-        rows = [{key: (row.get(key) or "").strip() for key in headers} for row in reader]
-    for name in fieldnames:
-        if name not in headers:
-            headers.append(name)
-            for row in rows:
-                row.setdefault(name, "")
-    return headers, rows
-
-
-def _write_simple_csv(path: str, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
-    os.replace(tmp_path, path)
-
-
-def _csv_lookup(row: Dict[str, str], *names: str) -> str:
-    lower = {str(key).strip().lower(): key for key in row}
-    for name in names:
-        key = lower.get(name.lower())
-        if key:
-            value = str(row.get(key) or "").strip()
-            if value:
-                return value
-    return ""
-
-
-def ensure_accounts_sheet() -> None:
-    if os.path.isfile(ACCOUNTS_SHEET):
-        return
-    rows = [{"user_id": item, "enabled": "yes", "name": "", "notes": ""} for item in _DEFAULT_PROFILE_IDS]
-    _write_simple_csv(ACCOUNTS_SHEET, ACCOUNTS_SHEET_FIELDS, rows)
-
-
-def ensure_subreddits_sheet() -> None:
-    if os.path.isfile(SUBREDDITS_SHEET):
-        return
-    rows = [
-        {"subreddit": "CasualConversation", "enabled": "yes", "notes": ""},
-        {"subreddit": "NoStupidQuestions", "enabled": "yes", "notes": ""},
-        {"subreddit": "Advice", "enabled": "yes", "notes": ""},
-    ]
-    _write_simple_csv(SUBREDDITS_SHEET, SUBREDDITS_SHEET_FIELDS, rows)
-
-
-def _row_is_enabled(row: Dict[str, str]) -> bool:
-    lower = {str(key).strip().lower(): key for key in row}
-    col = lower.get("enabled") or lower.get("active") or lower.get("on")
-    if not col:
-        return True
-    flag = str(row.get(col) or "").strip()
-    return (not flag) or _cell_enabled(flag)
-
-
-def load_account_ids_from_sheet() -> List[str]:
-    ensure_accounts_sheet()
-    _, rows = _read_simple_csv(ACCOUNTS_SHEET, ACCOUNTS_SHEET_FIELDS)
-    found: List[str] = []
-    seen = set()
-    for row in rows:
-        if not _row_is_enabled(row):
-            continue
-        user_id = _csv_lookup(row, "user_id", "account", "profile", "ads_power", "id")
-        if not user_id:
-            continue
-        key = user_id.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        found.append(user_id)
-    return found
-
-
-def load_browse_subreddits() -> List[str]:
-    ensure_subreddits_sheet()
-    _, rows = _read_simple_csv(SUBREDDITS_SHEET, SUBREDDITS_SHEET_FIELDS)
-    found: List[str] = []
-    seen = set()
-    for row in rows:
-        if not _row_is_enabled(row):
-            continue
-        name = _csv_lookup(row, "subreddit", "community", "sub")
-        name = name.lstrip("r/").lstrip("/")
-        if not name:
-            continue
-        key = name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        found.append(name)
-    return found
-
-
-def _read_profile_id_file(path: str) -> List[str]:
-    found: List[str] = []
-    seen = set()
-    if not os.path.isfile(path):
-        return found
-    try:
-        with open(path, encoding="utf-8") as handle:
-            for raw in handle:
-                line = raw.split("#", 1)[0].strip()
-                if not line:
-                    continue
-                key = line.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                found.append(line)
-    except Exception:
-        return []
-    return found
-
-
-def load_profile_ids() -> List[str]:
-    """Only AdsPower ids from accounts.csv (enabled=yes)."""
-    return load_account_ids_from_sheet()
 
 
 PROFILE_IDS: List[str] = load_profile_ids()
@@ -264,9 +133,11 @@ SUBREDDITS: List[str] = [
 SUBREDDITS_TO_BROWSE = SUBREDDITS
 SUBREDDITS_PER_SESSION = (1, 3)  # rolled again each sitting from subreddits.csv
 SUBREDDIT_ROTATION_RUNS = 1  # prefer sheet communities not used last sitting
-RANDOM_EXPLORE_PER_SESSION = (1, 4)  # extra random communities, count changes every sitting
+RANDOM_EXPLORE_PER_SESSION = (0, 3)  # extra random communities, including none
 EXPLORE_RANDOM_SUBS = True
-EXPLORE_SHARE = 0.30  # about 30% of communities this sitting are exploration
+EXPLORE_SHARE = 0.30  # unused for count; each sitting rolls explore_n instead
+_HOME_EXTRAS = ("popular", "inbox", "news")
+_BROWSE_ACTIONS = ("scroll", "break", "hover", "upvote", "open-post")
 # A random explore is skipped for this many later sittings on the same account,
 # then it can be explored again. Sheet communities (AskUK / NoStupidQuestions /
 # Advice) are never put on this cooldown.
@@ -290,7 +161,7 @@ _JOIN_ARRIVE_LABELS = {
 
 ACTIVITY_ON_HOMEPAGE = 12  # unused; home time comes from HOME_ACTIVITY_SHARE
 ACTIVITY_ON_SUBREDDIT = (12, 28)  # quick look inside a community, then back to Home
-ACCOUNT_SESSION_SECONDS = 7 * 60  # fallback only; live sittings roll 5–10 min
+ACCOUNT_SESSION_SECONDS = 10 * 60  # fallback only; live sittings roll 6–15 min
 POST_IN_SESSION_FRACTION = 0.45  # attempt post mid-sitting when there is room
 HOME_ACTIVITY_SHARE = 0.65  # default; each sitting rolls its own Home share
 HOME_ACTIVITY_SHARE_RANGE = (0.52, 0.78)
@@ -337,7 +208,7 @@ SCROLL_EASE_SETTLE = (0.08, 0.55)  # pause once the gesture stops
 SCROLL_BOUNCE_CHANCE = 0.40  # light rebound on some gestures
 SCROLL_BOUNCE_FRAC = (0.04, 0.10)  # rebound this fraction of the travel
 SCROLL_BOUNCE_TICKS = (1, 2)  # tiny opposite ticks as it settles
-SKIP_IMAGE_VIDEO_POSTS = True  # do not open / comment on image, video, or gallery posts
+SKIP_IMAGE_VIDEO_POSTS = True  # do not comment on image, video, or gallery posts (watching is allowed)
 READ_PAUSE = (0.5, 4.8)  # seconds spent reading after a scroll
 LONG_READ_PAUSE = (3.2, 11.0)  # occasional longer look at the feed
 HUMAN_BREAK_CHANCE = 0.07  # sit still like someone checked their phone
@@ -389,9 +260,9 @@ POSTS_SHEET = str(_POSTS_SHEET)
 POSTS_FILE = POSTS_SHEET
 POST_TEMPLATES_DIR = str(_POST_TEMPLATES_DIR)
 POSTS_SHEET_ROWS = 12
-ACTION_WINDOW_HOURS = 48
+ACTION_WINDOW_HOURS = 24
 ACTION_WINDOW_DAYS = ACTION_WINDOW_HOURS / 24.0
-COMMENTS_PER_WINDOW = 2  # sheet + general comments combined
+COMMENTS_PER_WINDOW = 1  # at most one comment per calendar day from day 8
 POSTS_PER_WINDOW = 1
 POST_COOLDOWN_DAYS = ACTION_WINDOW_DAYS
 POST_STATUS_WAIT = 10  # seconds to wait before checking LIVE vs REMOVED
@@ -405,7 +276,7 @@ FALLBACK_SUBREDDITS: List[str] = [
 ]
 
 # After activity: comment on post links from comments.csv.
-# One comment per unique link. Sheet + general comments share the 48h budget.
+# One comment per unique link. Sheet + general comments share the daily budget.
 # After a comment lands, the link is moved to commented_links.csv.
 COMMENTS_SHEET = str(_COMMENTS_SHEET)
 COMMENTED_LINKS_SHEET = str(_COMMENTED_LINKS_SHEET)
@@ -415,11 +286,11 @@ GENERAL_COMMENT_DAYS = ACTION_WINDOW_DAYS
 GENERAL_COMMENTS_PER_WEEK_MIN = 0
 GENERAL_COMMENTS_PER_WEEK_MAX = COMMENTS_PER_WINDOW
 COMMENT_MAX_PER_WEEK = COMMENTS_PER_WINDOW
-SHEET_COMMENTS_PER_RUN = 2  # comments.csv uses the same 48h comment budget
+SHEET_COMMENTS_PER_RUN = 1  # comments.csv uses the same daily comment budget
 COMMENT_EDIT_WAIT = (180, 240)  # after a comments.csv comment, wait 3–4 min then edit
-COMMENTS_PER_RUN = 2
-SESSION_GENERAL_COMMENTS = (1, 1)  # one general comment fits a 5–10 min sitting
-SESSION_COMMENT_CAP = 2
+COMMENTS_PER_RUN = 1
+SESSION_GENERAL_COMMENTS = (0, 1)  # some sittings skip the general comment
+SESSION_COMMENT_CAP = 1
 GENERAL_COMMENT_SUBS_PER_RUN = 4
 GENERAL_COMMENT_OPENS_PER_SUB = 3
 
@@ -427,11 +298,12 @@ GENERAL_COMMENT_OPENS_PER_SUB = 3
 KARMA_GROWTH_ENABLED = True
 COMMUNITY_GENERAL_POST = True  # when posts.csv has no row, write one post that fits the community
 GENERAL_POSTS_PER_WEEK = POSTS_PER_WINDOW
-MIN_KARMA_TO_POST = 6  # karma greater than 5; a community can still require more
-GENERAL_COMMENT_MIN_AGE_DAYS = 4  # general activity starts when the account is 4 days old
-WARMUP_MIN_AGE_DAYS = 4  # younger than 4 days: browse only
-WARMUP_MIN_KARMA = 5  # karma 5 or less: no post
-MAX_JOINS_PER_SESSION = 1  # one new Join click per sitting after warmup
+MIN_KARMA_TO_POST = 6  # community can still require more; age gate is day 14
+GENERAL_COMMENT_MIN_AGE_DAYS = 8  # comments from day 8
+WARMUP_MIN_AGE_DAYS = 4  # upvotes from day 4
+WARMUP_MIN_KARMA = 5  # karma 5 or less still cannot post
+MAX_JOINS_PER_SESSION = 1  # one new Join click per sitting from day 4
+MAX_JOINS_SAME_SUB_PER_CYCLE = 1
 GENERAL_POST_DAYS = ACTION_WINDOW_DAYS
 KARMA_POST_DAYS = GENERAL_POST_DAYS
 KARMA_COMMENT_DAYS = GENERAL_COMMENT_DAYS
@@ -447,7 +319,7 @@ POST_MIN_TEXT_SHARE = 0.25  # at least this share of recent posts are text posts
 POST_COMMUNITY_SAMPLE = 25  # recent posts sampled per community
 
 # Organic AI comments during browse. Weekly cap above is the real limit.
-MAX_AI_COMMENTS_PER_ACCOUNT_DAY = 8
+MAX_AI_COMMENTS_PER_ACCOUNT_DAY = 1
 MIN_DELAY_BETWEEN_AI_COMMENTS = 90  # seconds between general comments
 
 # Cross-account spreadsheet retry.
@@ -505,20 +377,23 @@ DELAY_BETWEEN_PROFILES = (10.0, 42.0)
 
 # Open every account and run browse/comment/post at the same time.
 PARALLEL_PROFILES = True
-MAX_PARALLEL_PROFILES = 8  # how many Chrome profiles run at once (rest wait in queue)
+MAX_PARALLEL_PROFILES = 4  # how many Chrome profiles run at once (rest wait in queue)
 PROFILE_DISK_MB = 400.0  # disk each extra Chrome needs on top of the reserve
 PROFILE_RAM_MB = 600.0  # RAM each extra Chrome needs
 PROFILE_RAM_RESERVE_MB = 800.0
 PARALLEL_START_STAGGER = (7.0, 28.0)  # seconds between launching each Chrome
 
 # Each account gets its own sitting length and start time this run.
-SESSION_SECONDS_RANGE = (5 * 60, 10 * 60)
+SESSION_SECONDS_RANGE = (6 * 60, 15 * 60)
 # AdsPower copies profile files on start. A full /home disk is why browsers
 # fail with "Failed to start browser" and logs die with "No space left on device".
 MIN_FREE_DISK_MB = 400.0
 PROFILE_START_DELAY = (8.0, 90.0)  # wait before this Chrome opens
 POST_IN_SESSION_RANGE = (0.35, 0.65)
 _tls = threading.local()
+_CYCLE_STARTED_ISO = ""
+_KNOWN_USERNAMES: set = set()
+_CYCLE_LOCK = threading.Lock()
 
 
 def _rng() -> random.Random:
@@ -558,6 +433,110 @@ def _shift_pair(
 
 def _clamp_chance(value: float, low: float = 0.02, high: float = 0.55) -> float:
     return max(low, min(high, float(value)))
+
+
+@dataclass
+class ActivityMenu:
+    """Per-sitting activity shape so two accounts do not click the same way."""
+
+    home_extras: Tuple[str, ...] = ()
+    search_when: str = "none"
+    leftover_dest: str = "home"
+    skip_join_on_explore: bool = False
+    skip_rules_on_explore: bool = False
+    home_gap: str = "on"
+    browse_order: Tuple[str, ...] = _BROWSE_ACTIONS
+    muted: Tuple[str, ...] = ()
+
+    def token(self) -> str:
+        extras = ",".join(self.home_extras) or "none"
+        muted = ",".join(self.muted) or "-"
+        return (
+            f"hx{extras}|sw{self.search_when}|lf{self.leftover_dest}|"
+            f"xj{int(self.skip_join_on_explore)}xr{int(self.skip_rules_on_explore)}|"
+            f"g{self.home_gap}|bo{''.join(item[0] for item in self.browse_order)}|"
+            f"mu{muted}"
+        )
+
+    def describe(self, explore_n: int, search_n: int) -> str:
+        labels = {"popular": "Popular", "inbox": "inbox", "news": "news"}
+        bits = [labels.get(name, name) for name in self.home_extras]
+        chosen = set(self.home_extras)
+        for name in _HOME_EXTRAS:
+            if name not in chosen:
+                bits.append(f"skip {name}")
+        extras = ", ".join(bits) if bits else "Home only"
+        if search_n <= 0 or self.search_when == "none":
+            search = "no search"
+        elif self.search_when == "after_first_hop":
+            search = "search after first hop"
+        else:
+            search = "search after Home"
+        leftover = {
+            "visited_subs": "leftover in visited communities",
+            "skip": "skip leftover",
+        }.get(self.leftover_dest, "leftover Home")
+        hops = []
+        if self.skip_join_on_explore:
+            hops.append("browse-only-explore")
+        if self.skip_rules_on_explore:
+            hops.append("skip-explore-rules")
+        hops.append(f"home-gap {self.home_gap}")
+        muted = f", mute {', '.join(self.muted)}" if self.muted else ""
+        return (
+            f"{extras} | {search} | explore {int(explore_n)} | {leftover} | "
+            f"hops {' '.join(hops)}{muted}"
+        )
+
+
+def roll_activity_menu(rng: random.Random) -> ActivityMenu:
+    extras: List[str] = []
+    if rng.random() < rng.uniform(0.20, 0.70):
+        extras.append("popular")
+    if rng.random() < rng.uniform(0.08, 0.45):
+        extras.append("inbox")
+    if rng.random() < rng.uniform(0.15, 0.65):
+        extras.append("news")
+    rng.shuffle(extras)
+    browse = list(_BROWSE_ACTIONS)
+    rng.shuffle(browse)
+    muted: List[str] = []
+    if rng.random() < 0.28:
+        muted.append("open-post")
+    if rng.random() < 0.22:
+        muted.append("upvote")
+    if rng.random() < 0.12:
+        muted.append("hover")
+    return ActivityMenu(
+        home_extras=tuple(extras),
+        search_when=rng.choice(("after_home", "after_first_hop")),
+        leftover_dest=rng.choices(
+            ("home", "visited_subs", "skip"), weights=(55, 30, 15), k=1
+        )[0],
+        skip_join_on_explore=rng.random() < 0.40,
+        skip_rules_on_explore=rng.random() < 0.45,
+        home_gap=rng.choices(("on", "rare", "off"), weights=(50, 32, 18), k=1)[0],
+        browse_order=tuple(browse),
+        muted=tuple(muted),
+    )
+
+
+def _activity_menu(style: Optional[SessionStyle] = None) -> ActivityMenu:
+    picked = style if style is not None else current_style()
+    menu = getattr(picked, "menu", None) if picked else None
+    return menu if isinstance(menu, ActivityMenu) else ActivityMenu()
+
+
+def should_skip_home_gap(style: Optional[SessionStyle]) -> bool:
+    menu = _activity_menu(style)
+    if menu.home_gap == "off":
+        return True
+    if style is not None and not style.hop_home_between:
+        return True
+    chance = float(style.home_skip_chance or 0) if style else 0.12
+    if menu.home_gap == "rare":
+        chance = max(chance, 0.55)
+    return _rng().random() < chance
 
 
 @dataclass
@@ -614,6 +593,7 @@ class SessionStyle:
     type_space: Tuple[float, float] = (0.05, 0.18)
     type_punct: Tuple[float, float] = (0.16, 0.48)
     type_nl: Tuple[float, float] = (0.18, 0.45)
+    menu: ActivityMenu = field(default_factory=ActivityMenu)
 
     def summary(self) -> str:
         sorts = "→".join(self.listing_sorts)
@@ -643,6 +623,7 @@ class SessionStyle:
                 f"tp{int(self.type_char[0] * 200)}",
                 f"br{int(self.break_chance * 50)}",
                 f"hv{int(self.hover_chance * 40)}",
+                self.menu.token() if self.menu else "",
                 names,
             )
         )
@@ -755,6 +736,16 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
     home_share = rng.uniform(*HOME_ACTIVITY_SHARE_RANGE)
     community_share = rng.uniform(*MAX_COMMUNITY_SHARE_RANGE)
     community_share = min(community_share, max(0.12, 0.92 - home_share))
+    menu = roll_activity_menu(rng)
+    if menu.home_gap == "off":
+        hop_home = False
+        home_skip = rng.uniform(0.70, 0.95)
+    elif menu.home_gap == "rare":
+        hop_home = True
+        home_skip = rng.uniform(0.55, 0.82)
+    else:
+        hop_home = True
+        home_skip = rng.uniform(0.04, 0.18)
     return SessionStyle(
         seed=seed,
         persona=persona,
@@ -764,7 +755,7 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         listing_top_bias=rng.uniform(0.22, 0.92),
         start_with_profile=rng.random() < 0.18,
         home_first_seconds=rng.uniform(*HOME_ACTIVITY_BEFORE_JOIN),
-        hop_home_between=rng.random() < 0.82,
+        hop_home_between=hop_home,
         leftover_mode=leftover_mode,
         scroll_down=down,
         scroll_up=up,
@@ -800,13 +791,14 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         bail_chance=rng.uniform(0.06, 0.18),
         home_share=home_share,
         community_share=community_share,
-        home_skip_chance=rng.uniform(0.04, 0.28),
+        home_skip_chance=home_skip,
         explore_n=rng.randint(*RANDOM_EXPLORE_PER_SESSION),
         search_n=rng.randint(*SEARCHES_PER_SESSION),
         type_char=_shift_pair(rng, (0.03, 0.11), 0.65, 1.45, min_lo=0.018),
         type_space=_shift_pair(rng, (0.05, 0.18), 0.7, 1.4, min_lo=0.03),
         type_punct=_shift_pair(rng, (0.16, 0.48), 0.7, 1.4, min_lo=0.1),
         type_nl=_shift_pair(rng, (0.18, 0.45), 0.7, 1.4, min_lo=0.12),
+        menu=menu,
     )
 
 
@@ -906,6 +898,14 @@ def unique_session_plan(
         return style, subs, fingerprint
     last_style = _apply(last_style)
     last_style.leftover_mode = f"{last_style.leftover_mode}-{secrets.token_hex(2)}"
+    extras = list(last_style.menu.home_extras)
+    _rng().shuffle(extras)
+    last_style.menu.home_extras = tuple(extras)
+    last_style.menu.search_when = (
+        "after_first_hop"
+        if last_style.menu.search_when == "after_home"
+        else "after_home"
+    )
     last_fp = last_style.fingerprint(last_subs)
     _claim(last_fp)
     remember_session_pattern(user_id, last_fp)
@@ -920,7 +920,7 @@ def assign_profile_schedules(
         return {}
     lo_min = SESSION_SECONDS_RANGE[0] / 60.0
     hi_min = SESSION_SECONDS_RANGE[1] / 60.0
-    # Keep sittings distinct inside the 5–10 min band (~20s apart).
+    # Keep sittings distinct inside the 6–15 min band (~20s apart).
     min_gap_min = 0.35
     minutes: List[float] = []
     for _ in targets:
@@ -991,6 +991,214 @@ def community_dwell_seconds(style: Optional[SessionStyle], remaining: float) -> 
     return max(MIN_SUBREDDIT_DWELL, dwell)
 
 
+def _click_named_nav(driver: WebDriver, names: Sequence[str]) -> bool:
+    wanted = [str(name or "").strip().lower() for name in names if name]
+    if not wanted:
+        return False
+    try:
+        return bool(
+            driver.execute_script(
+                """
+                const wanted = arguments[0];
+                function walk(root, fn) {
+                  fn(root);
+                  try { root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot, fn); }); } catch (e) {}
+                }
+                const hits = [];
+                walk(document, root => {
+                  try {
+                    root.querySelectorAll('a, button, [role="link"], [role="button"]').forEach(el => {
+                      const t = ((el.innerText || el.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                      if (wanted.some(w => t === w || t.includes(w))) hits.push(el);
+                    });
+                  } catch (e) {}
+                });
+                for (const el of hits) {
+                  try {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 6 || r.height < 6) continue;
+                    el.click();
+                    return true;
+                  } catch (e) {}
+                }
+                return false;
+                """,
+                wanted,
+            )
+        )
+    except Exception:
+        return False
+
+
+def maybe_switch_feed_sort(driver: WebDriver, label: str, stats: AccountSummary) -> None:
+    if _rng().random() > 0.60:
+        return
+    sort = warmup_ladder.pick_feed_sort()
+    started = time.time()
+    try:
+        if _click_named_nav(driver, ("sort", "sort by", "best", "hot")):
+            time.sleep(_rng().uniform(0.4, 1.0))
+            if _click_named_nav(driver, (sort,)):
+                stats.feed_sorts.append(sort)
+                log(f"[Profile {label}] Switched feed sort to {sort}")
+    except Exception as exc:
+        log(f"[Profile {label}] Feed sort skipped ({brief_error(exc)})")
+    if time.time() - started > warmup_ladder.ACTION_WATCHDOG_SECONDS:
+        log(f"[Profile {label}] Feed sort watchdog — moving on")
+
+
+def maybe_open_popular(
+    driver: WebDriver, label: str, stats: AccountSummary, force: bool = False
+) -> None:
+    if not force and _rng().random() > 0.35:
+        return
+    started = time.time()
+    try:
+        if _click_named_nav(driver, ("popular",)):
+            log(f"[Profile {label}] Opened Popular from the sidebar")
+            human_sleep(_rng().uniform(8.0, 22.0))
+        else:
+            navigate(driver, "https://www.reddit.com/r/popular/", label)
+            human_sleep(_rng().uniform(8.0, 18.0))
+    except Exception as exc:
+        log(f"[Profile {label}] Popular skipped ({brief_error(exc)})")
+    if time.time() - started > warmup_ladder.ACTION_WATCHDOG_SECONDS:
+        log(f"[Profile {label}] Popular watchdog — moving on")
+        try:
+            return_to_reddit_home(driver, label, reason="after Popular watchdog")
+        except Exception:
+            pass
+
+
+def maybe_glance_inbox(
+    driver: WebDriver, label: str, stats: AccountSummary, force: bool = False
+) -> None:
+    if not force and _rng().random() > 0.22:
+        return
+    started = time.time()
+    try:
+        if _click_named_nav(driver, ("inbox", "chat", "messages", "notifications")):
+            stats.inbox_glances += 1
+            log(f"[Profile {label}] Glanced at inbox")
+            human_sleep(_rng().uniform(4.0, 12.0))
+            return_to_reddit_home(driver, label, reason="after inbox")
+    except Exception as exc:
+        log(f"[Profile {label}] Inbox skipped ({brief_error(exc)})")
+    if time.time() - started > warmup_ladder.ACTION_WATCHDOG_SECONDS:
+        log(f"[Profile {label}] Inbox watchdog — moving on")
+
+
+def maybe_read_news(
+    driver: WebDriver, label: str, stats: AccountSummary, force: bool = False
+) -> None:
+    if not warmup_ladder.may_news(stats.account_age_days):
+        return
+    if int(stats.news_reads or 0) >= 2:
+        return
+    if not force and _rng().random() > 0.40:
+        return
+    started = time.time()
+    try:
+        opened = _click_named_nav(driver, ("news",))
+        if not opened:
+            navigate(driver, "https://www.reddit.com/r/news/", label)
+        human_sleep(_rng().uniform(6.0, 14.0))
+        post = _random_post_title(driver)
+        if post is not None and human_click(driver, post):
+            time.sleep(_rng().uniform(1.4, 3.2))
+            handles = list(driver.window_handles)
+            here = driver.current_window_handle
+            article = None
+            try:
+                for handle in handles:
+                    if handle != here:
+                        article = handle
+                        break
+            except Exception:
+                article = None
+            if article:
+                driver.switch_to.window(article)
+                bucket = _rng().random()
+                if bucket < 0.45:
+                    nap = _rng().uniform(25, 60)
+                elif bucket < 0.85:
+                    nap = _rng().uniform(60, 120)
+                else:
+                    nap = _rng().uniform(120, 160)
+                human_sleep(nap)
+                driver.close()
+                driver.switch_to.window(here)
+            else:
+                human_sleep(_rng().uniform(12.0, 35.0))
+            stats.news_reads += 1
+            log(f"[Profile {label}] Read a News article")
+            if _rng().random() < 0.75:
+                read_opened_thread(driver, _rng().uniform(8.0, 18.0), label)
+                if _rng().random() < 0.60:
+                    upvote_random_post(driver, label, stats, read_first=True)
+        return_to_reddit_home(driver, label, reason="after News")
+    except Exception as exc:
+        log(f"[Profile {label}] News skipped ({brief_error(exc)})")
+        try:
+            return_to_reddit_home(driver, label, reason="after News error")
+        except Exception:
+            pass
+    if time.time() - started > warmup_ladder.ACTION_WATCHDOG_SECONDS:
+        log(f"[Profile {label}] News watchdog — moving on")
+
+
+def maybe_follow_commenter(driver: WebDriver, label: str, stats: AccountSummary) -> None:
+    if not warmup_ladder.may_follow(stats.account_age_days):
+        return
+    chance = _rng().uniform(*warmup_ladder.FOLLOW_CHANCE_RANGE)
+    if _rng().random() > chance:
+        return
+    try:
+        from reddit_joiner.store import (
+            follow_count_for_user,
+            follows_for_account,
+            follows_today_for_account,
+            record_follow,
+        )
+    except Exception:
+        return
+    if follows_today_for_account(stats.user_id) >= warmup_ladder.FOLLOW_MAX_PER_DAY:
+        return
+    have = follows_for_account(stats.user_id)
+    total_cap = _rng().randint(*warmup_ladder.FOLLOW_TOTAL_RANGE)
+    if len(have) >= total_cap:
+        return
+    started = time.time()
+    try:
+        href = driver.execute_script(
+            """
+            const links = Array.from(document.querySelectorAll('a[href*="/user/"], a[href*="/u/"]'));
+            for (const a of links) {
+              const t = (a.getAttribute('href') || '');
+              if (t.split('/').filter(Boolean).length >= 2) return t;
+            }
+            return '';
+            """
+        )
+        name = str(href or "").strip().rstrip("/").split("/")[-1].lower()
+        if not name or name in {"user", "u"}:
+            return
+        if name in _KNOWN_USERNAMES or name == (stats.reddit_username or "").lower():
+            return
+        if follow_count_for_user(name) >= warmup_ladder.FOLLOW_SHARED_CAP:
+            return
+        navigate(driver, f"https://www.reddit.com/user/{name}/", label)
+        human_sleep(_rng().uniform(6.0, 16.0))
+        if _click_named_nav(driver, ("follow", "follow u/", "+ follow")):
+            record_follow(stats.user_id, name, account=stats.name)
+            stats.follows_this_run += 1
+            log(f"[Profile {label}] Followed u/{name}")
+    except Exception as exc:
+        log(f"[Profile {label}] Follow skipped ({brief_error(exc)})")
+    if time.time() - started > warmup_ladder.ACTION_WATCHDOG_SECONDS:
+        log(f"[Profile {label}] Follow watchdog — moving on")
+
+
 def hop_reddit_home(
     driver: WebDriver,
     label: str,
@@ -1006,6 +1214,17 @@ def hop_reddit_home(
     else:
         log(f"[Profile {label}] {dwell:.0f}s random activity on Home ({reason})")
     return_to_reddit_home(driver, label, reason=reason)
+    maybe_switch_feed_sort(driver, label, stats)
+    if "first" in (reason or "").lower():
+        extras = {
+            "popular": maybe_open_popular,
+            "inbox": maybe_glance_inbox,
+            "news": maybe_read_news,
+        }
+        for name in _activity_menu().home_extras:
+            runner = extras.get(name)
+            if runner is not None:
+                runner(driver, label, stats, force=True)
     perform_browse_activity(
         driver,
         dwell,
@@ -1784,6 +2003,7 @@ class AccountSummary:
     upvotes: int = 0
     comments: int = 0
     sheet_comments: int = 0
+    comments_thread_visible: int = 0
     comment_note: str = ""
     posted: str = ""
     post_note: str = ""
@@ -1817,6 +2037,7 @@ class AccountSummary:
     rules_by_sub: Dict[str, Any] = field(default_factory=dict)
     rules_read: List[str] = field(default_factory=list)
     lurk_subs: List[str] = field(default_factory=list)
+    pending_join_comment: List[str] = field(default_factory=list)
     comment_sorts: List[str] = field(default_factory=list)
     session_style_note: str = ""
     subreddit_topics: Dict[str, List[str]] = field(default_factory=dict)
@@ -1829,6 +2050,13 @@ class AccountSummary:
     join_arrive_ways: List[str] = field(default_factory=list)
     sitting_ok: bool = True
     session_started_at: float = 0.0
+    upvote_target: int = 0
+    comment_upvotes: int = 0
+    news_reads: int = 0
+    follows_this_run: int = 0
+    media_watched: int = 0
+    inbox_glances: int = 0
+    feed_sorts: List[str] = field(default_factory=list)
 
     def display_name(self) -> str:
         if self.reddit_username:
@@ -1839,8 +2067,8 @@ class AccountSummary:
         return int(self.comments or 0) + int(self.sheet_comments or 0)
 
     def comments_visible(self) -> int:
-        # A comment is only counted after it is seen on the thread.
-        return self.comments_placed()
+        """Only comments the thread check actually saw. Unchecked comments are not counted."""
+        return int(self.comments_thread_visible or 0)
 
     def posts_placed(self) -> int:
         status = (self.post_status or "").strip().lower()
@@ -1856,10 +2084,12 @@ class AccountSummary:
         return 0
 
     def is_banned(self) -> bool:
-        return "banned" in (self.account_status or "").lower()
+        text = (self.account_status or "").lower()
+        return "banned" in text or "suspended" in text
 
     def is_warmup_browse(self) -> bool:
-        return bool(account_in_warmup(self)) and self.comments_placed() <= 0 and not self.is_banned()
+        allowed, _why = account_may_general_comment(self)
+        return (not allowed) and self.comments_placed() <= 0 and not self.is_banned()
 
     def one_line(self) -> str:
         who = self.display_name()
@@ -1873,7 +2103,7 @@ class AccountSummary:
         age = f"{self.account_age_days:.0f}d" if self.account_age_days else "?d"
         parts = [who, f"karma {karma}", age]
         if self.is_warmup_browse():
-            parts.append("warmup browse only")
+            parts.append(warmup_ladder.day_band_label(self.account_age_days))
         else:
             placed = self.comments_placed()
             visible = self.comments_visible()
@@ -1881,6 +2111,8 @@ class AccountSummary:
                 parts.append("comment 0")
             elif visible >= placed:
                 parts.append(f"comment {visible} visible")
+            elif visible <= 0:
+                parts.append(f"comment {placed} placed, visibility unknown")
             else:
                 parts.append(f"comment {placed} placed, {visible} visible")
             status = (self.post_status or "none").strip().lower() or "none"
@@ -1890,10 +2122,9 @@ class AccountSummary:
             elif status == "removed":
                 parts.append("post removed")
             elif status in {"skipped", "none"}:
-                if karma <= WARMUP_MIN_KARMA:
-                    parts.append(f"post skipped, karma {karma}")
-                elif account_in_warmup(self):
-                    parts.append("post skipped, warmup")
+                allowed_post, post_why = account_may_post(self)
+                if not allowed_post:
+                    parts.append(f"post skipped, {post_why.split('—')[0].strip()}")
                 else:
                     parts.append("post skipped")
             elif status == "failed":
@@ -1938,7 +2169,7 @@ class AccountSummary:
         if self.searches:
             queries = ", ".join(f'"{item}"' for item in self.search_queries)
             lines.append(f"  Searches   : {self.searches} on the New tab ({queries})")
-        target = self.session_comment_target or SESSION_COMMENT_CAP
+        target = int(self.session_comment_target or 0)
         sorts = ", ".join(self.comment_sorts) if self.comment_sorts else "none"
         lines.append(
             f"  Comments   : {self.comments} general this run "
@@ -2028,12 +2259,20 @@ def session_tally_lines(reports: List[AccountSummary]) -> List[str]:
     no_browser = [item for item in ran if not item.sitting_ok]
     comments = sum(item.comments_placed() for item in ran)
     visible = sum(item.comments_visible() for item in ran)
+    unchecked = max(0, comments - visible)
     posts = sum(item.posts_placed() for item in ran)
     live = sum(item.posts_live() for item in ran)
+    if unchecked:
+        comment_line = (
+            f"Comments placed           : {comments}  "
+            f"({visible} confirmed on thread, {unchecked} not checked)"
+        )
+    else:
+        comment_line = f"Comments placed           : {comments}  ({visible} still visible)"
     return [
         f"Accounts ran              : {len(ran)}",
         f"Warm-up browse only       : {len(warmup)}",
-        f"Comments placed           : {comments}  ({visible} still visible)",
+        comment_line,
         f"Posts placed              : {posts}  ({live} live)",
         f"Banned                    : {len(banned)}",
         f"Browser did not start     : {len(no_browser)}",
@@ -2317,27 +2556,38 @@ def _rank_post_targets(
     return [name for _, name in scored]
 
 
-def _rl_comment_choices(rules: Any, *, force: bool, subreddit: str = "") -> List[str]:
-    """Tones this community still allows. Funny/expert get dropped on strict subs."""
+def _rl_comment_choices(
+    rules: Any,
+    *,
+    force: bool,
+    subreddit: str = "",
+    exclude: Optional[Iterable[str]] = None,
+    stats: Optional[AccountSummary] = None,
+) -> List[str]:
+    """Tones this community and this account still allow."""
     from reddit_joiner.rl import COMMENT_ACTIONS, COMMENT_TONE_ACTIONS
     from reddit_joiner.rules import safer_tone
 
+    too_new = bool(stats is not None and _too_new_for_general_comment(stats))
+    warming = bool(stats is not None and account_in_warmup(stats))
+    if too_new:
+        force = False
     pool = list(COMMENT_TONE_ACTIONS if force else COMMENT_ACTIONS)
     strict = float(getattr(rules, "strictness", 0) or 0) if rules is not None else 0.0
     flags = (getattr(rules, "flags", None) or {}) if rules is not None else {}
-    blocked = set()
+    blocked = {str(item).lower() for item in (exclude or []) if item}
     if subreddit:
         try:
             from reddit_joiner.community_memory import skipped_tones
 
-            blocked = {item.lower() for item in skipped_tones(subreddit)}
+            blocked.update(item.lower() for item in skipped_tones(subreddit))
         except Exception:
-            blocked = set()
+            pass
     out: List[str] = []
     for action in pool:
         if action.startswith("comment:"):
             tone = action.split(":", 1)[-1]
-            if tone.lower() in blocked:
+            if tone.lower() in blocked or action.lower() in blocked:
                 continue
             try:
                 if safer_tone(rules, tone) != tone:
@@ -2346,13 +2596,19 @@ def _rl_comment_choices(rules: Any, *, force: bool, subreddit: str = "") -> List
                 pass
             if strict >= 0.4 and tone == "funny":
                 continue
-            if flags.get("account_gate") and tone in {"funny", "expert"}:
+            if (flags.get("account_gate") or flags.get("no_humor") or warming or too_new) and tone in {
+                "funny",
+                "expert",
+            }:
                 continue
+        elif action.lower() in blocked:
+            continue
         out.append(action)
+    if too_new:
+        return ["skip"]
     if force:
-        tones = [item for item in out if item.startswith("comment:")]
-        return tones or list(COMMENT_TONE_ACTIONS)
-    return out or pool
+        return [item for item in out if item.startswith("comment:")]
+    return out or (["skip"] if blocked else pool)
 
 
 def _rl_learn(
@@ -2373,11 +2629,38 @@ def _rl_learn(
             agent.update_q_value(
                 state, action, reward, next_state, next_actions, graded=graded
             )
-        stats.rl_actions += 1
+            stats.rl_actions += 1
         stats.rl_reward += float(reward)
         stats.rl_epsilon = float(agent.epsilon)
     except Exception as exc:
         stats.rl_note = brief_error(exc)
+
+
+def _account_rejected_by_community(
+    driver: WebDriver,
+    label: str,
+    subreddit: str,
+    stats: AccountSummary,
+    rules: Any = None,
+) -> str:
+    """Karma/age/NSFW gate from about+rules. Post-only limits are ignored."""
+    flags = (getattr(rules, "flags", None) or {}) if rules is not None else {}
+    if rules is not None and not flags.get("account_gate"):
+        return ""
+    try:
+        _summary, _allowed, reason = analyze_subreddit_for_account(
+            driver,
+            label,
+            subreddit,
+            stats.account_karma,
+            stats.account_age_days,
+        )
+    except Exception:
+        return ""
+    text = (reason or "").lower()
+    if text == "nsfw" or "karma" in text or "day old" in text or text.startswith("needs"):
+        return str(reason)
+    return ""
 
 
 def _removal_reward(reason: str) -> float:
@@ -2391,55 +2674,13 @@ def _removal_reward(reason: str) -> float:
 # ADSPOWER LOCAL API
 # =============================================================================
 
-_last_api_call_at = 0.0
-
-
-def _api_headers() -> Dict[str, str]:
-    headers = {"Content-Type": "application/json"}
-    if ADSPOWER_API_KEY:
-        headers["Authorization"] = f"Bearer {ADSPOWER_API_KEY}"
-    return headers
-
-
-def _throttle_api() -> None:
-    global _last_api_call_at
-    with _API_LOCK:
-        elapsed = time.time() - _last_api_call_at
-        if elapsed < API_MIN_INTERVAL:
-            time.sleep(API_MIN_INTERVAL - elapsed)
-        _last_api_call_at = time.time()
-
-
-def adspower_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if stop_requested():
-        raise RuntimeError("stopped")
-    _throttle_api()
-    url = f"{ADSPOWER_API}{path}"
-    response = requests.get(
-        url, params=params, headers=_api_headers(), timeout=REQUEST_TIMEOUT
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("code") not in (0, None) and str(payload.get("code")) != "0":
-        raise RuntimeError(
-            f"AdsPower API error on {path}: code={payload.get('code')} "
-            f"msg={payload.get('msg')}"
-        )
-    return payload
-
-
-def adspower_api_ready() -> bool:
-    try:
-        payload = requests.get(
-            f"{ADSPOWER_API}/status", headers=_api_headers(), timeout=8
-        ).json()
-        return payload.get("code") in (0, None) or str(payload.get("code")) == "0"
-    except Exception:
-        try:
-            requests.get(f"{ADSPOWER_API}/api/v1/user/list", params={"page": 1, "page_size": 1}, timeout=8)
-            return True
-        except Exception:
-            return False
+from reddit_joiner.adspower import (  # noqa: E402
+    adspower_api_ready,
+    adspower_get,
+    start_profile,
+    stop_profile,
+    wait_until_profile_open,
+)
 
 
 def _load_profile_cache() -> List[Dict[str, str]]:
@@ -2552,20 +2793,38 @@ def general_comments_this_week(user_id: str) -> List[Dict[str, Any]]:
     return found
 
 
+def comments_today_from_log(user_id: str) -> int:
+    start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    count = 0
+    for item in _account_comment_items(user_id):
+        try:
+            when = float(item.get("at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if when >= start:
+            count += 1
+    return count
+
+
 def comments_remaining(user_id: str) -> int:
-    return max(0, COMMENTS_PER_WINDOW - len(general_comments_this_week(user_id)))
+    have = comments_today_from_log(user_id)
+    try:
+        from reddit_joiner.store import comments_today_for_account
+
+        have = max(have, int(comments_today_for_account(user_id) or 0))
+    except Exception:
+        pass
+    return max(0, COMMENTS_PER_WINDOW - have)
 
 
 def hours_until_comment_room(user_id: str) -> float:
-    """Hours until the oldest 48h comment ages out and a new slot opens."""
-    items = general_comments_this_week(user_id)
-    if len(items) < COMMENTS_PER_WINDOW:
+    """Hours until tomorrow's comment slot opens."""
+    if comments_remaining(user_id) > 0:
         return 0.0
-    oldest = min(float(item.get("at") or 0) for item in items if item.get("at"))
-    if not oldest:
-        return 0.0
-    unlock = oldest + float(ACTION_WINDOW_HOURS) * 3600.0
-    return max(0.0, (unlock - time.time()) / 3600.0)
+    tomorrow = datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) + timedelta(days=1)
+    return max(0.0, (tomorrow.timestamp() - time.time()) / 3600.0)
 
 
 def general_comment_need(
@@ -2580,30 +2839,29 @@ def general_comment_need(
 
 
 def account_may_post(stats: AccountSummary) -> Tuple[bool, str]:
+    _karma, age = _account_karma_age(stats)
+    allowed, why = warmup_ladder.may_post(age)
+    if not allowed:
+        return False, why
     karma = int(stats.account_karma or 0)
     if karma <= WARMUP_MIN_KARMA:
         return (
             False,
             f"karma {karma} — need more than {WARMUP_MIN_KARMA} to post",
         )
+    gap_lo, gap_hi = warmup_ladder.POST_GAP_DAYS
+    waited = days_since_last_post(stats.user_id)
+    if waited is not None and waited < float(gap_lo):
+        return (
+            False,
+            f"last post {waited:.1f} days ago — wait {gap_lo}-{gap_hi} days",
+        )
     return True, ""
 
 
 def account_may_general_comment(stats: AccountSummary) -> Tuple[bool, str]:
     _karma, age = _account_karma_age(stats)
-    if age >= float(GENERAL_COMMENT_MIN_AGE_DAYS):
-        return True, ""
-    if age >= 1.0:
-        return (
-            False,
-            f"account is {age:.0f} days old — general activity from "
-            f"{GENERAL_COMMENT_MIN_AGE_DAYS} days",
-        )
-    return (
-        False,
-        "account age was not read — no general activity until the account is "
-        f"{GENERAL_COMMENT_MIN_AGE_DAYS} days old",
-    )
+    return warmup_ladder.may_comment(age)
 
 
 def record_account_comment(user_id: str, link: str, text: str, kind: str = "sheet") -> None:
@@ -2693,10 +2951,10 @@ _search_account_ids: set = set()
 
 
 def assign_batch_search_accounts(targets: List[Dict[str, str]]) -> None:
-    """Pick 2 accounts in each wave of 8 to run a short Home search. The rest skip it."""
+    """Pick a few accounts in each parallel wave to run a short Home search. The rest skip it."""
     global _search_account_ids
     allowed: set = set()
-    wave = max(1, int(MAX_PARALLEL_PROFILES) or 8)
+    wave = max(1, int(MAX_PARALLEL_PROFILES) or 4)
     rng = random.Random(secrets.randbits(64))
     take = max(0, int(SEARCH_ACCOUNTS_PER_BATCH))
     for start in range(0, len(targets), wave):
@@ -4517,31 +4775,6 @@ def wait_for_proxy_ip(driver: WebDriver, label: str, user_id: str) -> str:
     return ""
 
 
-def wait_until_profile_open(user_id: str, label: str, timeout: float = 90.0) -> Dict[str, Any]:
-    """Wait until this account's Chrome debugger is ready. Do not require the Opened list."""
-    deadline = time.time() + timeout
-    data: Dict[str, Any] = {}
-    last_log = 0.0
-    while time.time() < deadline:
-        try:
-            payload = adspower_get("/api/v1/browser/active", params={"user_id": user_id})
-            info = payload.get("data") or {}
-            selenium = ((info.get("ws") or {}).get("selenium") or "").strip()
-            status = str(info.get("status") or "").lower()
-            if selenium:
-                return info
-            if status == "active":
-                data = info
-        except Exception:
-            pass
-        now = time.time()
-        if now - last_log >= 8:
-            log(f"[Profile {label}] Waiting for the account browser… {int(max(0, deadline - now))}s left")
-            last_log = now
-        time.sleep(1.2)
-    return data
-
-
 def click_open_in_adspower(name: str, serial: str, user_id: str, label: str) -> bool:
     """
     Click only a detected blue Open button. Do not click/scroll the AdsPower
@@ -4579,128 +4812,6 @@ def click_open_in_adspower(name: str, serial: str, user_id: str, label: str) -> 
     except Exception as exc:
         log(f"[Profile {label}] AdsPower Open click skipped ({brief_error(exc)})")
         return False
-
-
-def _poll_profile_debugger(user_id: str, seconds: float = 16.0) -> Dict[str, Any]:
-    deadline = time.time() + seconds
-    data: Dict[str, Any] = {}
-    while time.time() < deadline:
-        try:
-            payload = adspower_get("/api/v1/browser/active", params={"user_id": user_id})
-            info = payload.get("data") or {}
-            if ((info.get("ws") or {}).get("selenium") or "").strip():
-                return info
-            data = info or data
-        except Exception:
-            pass
-        time.sleep(1.4)
-    return data
-
-
-def _start_profile_via_api(user_id: str, label: str) -> Dict[str, Any]:
-    last_error: Optional[BaseException] = None
-    for attempt in range(1, 4):
-        if stop_requested():
-            raise RuntimeError("stopped")
-        existing = _poll_profile_debugger(user_id, seconds=2.0)
-        if ((existing.get("ws") or {}).get("selenium") or "").strip():
-            return existing
-        log(f"[Profile {label}] Opening the Reddit account browser (AdsPower Start API, try {attempt}/3)")
-        try:
-            payload = adspower_get(
-                "/api/v1/browser/start",
-                params={
-                    "user_id": user_id,
-                    "open_tabs": 0,
-                    "ip_tab": 1,
-                    "new_first_tab": 1,
-                    "headless": 0,
-                    "cdp_mask": 1,
-                },
-            )
-            return payload.get("data") or {}
-        except RuntimeError as exc:
-            last_error = exc
-            message = str(exc).lower()
-            log(f"[Profile {label}] Start API failed ({brief_error(exc)}) — waiting for the browser")
-            waited = _poll_profile_debugger(user_id, seconds=12.0)
-            if ((waited.get("ws") or {}).get("selenium") or "").strip():
-                return waited
-            if "already" in message or "is open" in message or "being used" in message:
-                payload = adspower_get("/api/v1/browser/active", params={"user_id": user_id})
-                return payload.get("data") or {}
-            time.sleep(2.0 * attempt)
-    if last_error:
-        raise last_error
-    return {}
-
-
-def start_profile(
-    user_id: str,
-    label: str,
-    name: str = "",
-    serial: str = "",
-) -> Dict[str, Any]:
-    """Open the profile browser. Activity never starts in the AdsPower manager."""
-    already = opened_profile_ids()
-    if user_id in already:
-        log(f"[Profile {label}] Account already open — attaching")
-        payload = adspower_get("/api/v1/browser/active", params={"user_id": user_id})
-        data = payload.get("data") or {}
-        if ((data.get("ws") or {}).get("selenium") or "").strip():
-            return data
-
-    if not PARALLEL_PROFILES:
-        try:
-            focus_adspower_window()
-        except Exception:
-            pass
-
-    clicked = False
-    if not PARALLEL_PROFILES:
-        try:
-            clicked = click_open_in_adspower(name, serial, user_id, label)
-        except Exception as exc:
-            log(f"[Profile {label}] Open click skipped ({brief_error(exc)})")
-    else:
-        log(f"[Profile {label}] Opening via AdsPower Start API (parallel)")
-
-    data: Dict[str, Any] = {}
-    if clicked:
-        wait_for_adspower_proxy_phase(label)
-        log(f"[Profile {label}] Waiting for the account browser after proxy assign/refresh")
-        data = wait_until_profile_open(user_id, label, timeout=90.0)
-        if ((data.get("ws") or {}).get("selenium") or "").strip():
-            log(f"[Profile {label}] Account browser is open")
-            return data
-        if user_id in opened_profile_ids():
-            log(f"[Profile {label}] AdsPower already shows this account as Opened — waiting on debugger")
-            data = wait_until_profile_open(user_id, label, timeout=40.0)
-            if ((data.get("ws") or {}).get("selenium") or "").strip():
-                log(f"[Profile {label}] Account browser is open")
-                return data
-        log(f"[Profile {label}] Open click did not expose debugger — trying Start API")
-
-    data = _start_profile_via_api(user_id, label)
-    selenium_addr = ((data.get("ws") or {}).get("selenium") or "").strip()
-    if not selenium_addr:
-        time.sleep(3.0)
-        payload = adspower_get("/api/v1/browser/active", params={"user_id": user_id})
-        data = payload.get("data") or {}
-        selenium_addr = ((data.get("ws") or {}).get("selenium") or "").strip()
-    if not selenium_addr:
-        raise RuntimeError("AdsPower did not open the account browser (no debuggerAddress)")
-    log(f"[Profile {label}] Account browser is open — debugger {selenium_addr}")
-    return data
-
-
-def stop_profile(user_id: str, label: str) -> None:
-    """Step E — close the profile with /api/v1/browser/stop."""
-    try:
-        adspower_get("/api/v1/browser/stop", params={"user_id": user_id})
-        log(f"[Profile {label}] AdsPower Stop API called")
-    except Exception as exc:
-        log(f"[Profile {label}] Stop API warning: {brief_error(exc)}")
 
 
 # =============================================================================
@@ -5054,13 +5165,15 @@ fetch(url, {credentials: 'include', headers: {Accept: 'application/json'}})
 """
 
 
-def reddit_session_json(driver: WebDriver, url: str, label: str = "") -> Dict[str, Any]:
+def reddit_session_json(driver: WebDriver, url: str, label: str = "") -> Any:
     """Read a reddit.com JSON endpoint using the logged-in AdsPower session."""
     prefix = f"[Profile {label}] " if label else ""
     try:
         driver.set_script_timeout(20)
         data = driver.execute_async_script(_FETCH_JSON_JS, url)
-        if isinstance(data, dict) and not data.get("error"):
+        if isinstance(data, dict) and data.get("error"):
+            return {}
+        if isinstance(data, (dict, list)):
             return data
     except Exception as exc:
         log(f"{prefix}JSON fetch failed for {url.split('?')[0][-60:]} ({brief_error(exc)})")
@@ -5769,11 +5882,39 @@ def _find_join_button(driver: WebDriver) -> Optional[Any]:
     return None
 
 
+def _about_join_state(driver: WebDriver, label: str, subreddit: str) -> Dict[str, Any]:
+    name = normalize_subreddit(subreddit)
+    payload = reddit_session_json(
+        driver, f"https://www.reddit.com/r/{name}/about.json", label
+    )
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    kind = str(data.get("subreddit_type") or data.get("type") or "public").lower()
+    return {
+        "subscriber": bool(data.get("user_is_subscriber")),
+        "kind": kind,
+        "quarantine": bool(data.get("quarantine")),
+        "restricted": kind in {"private", "restricted", "gold_restricted", "archived"},
+        "removed": kind in {"user", ""} and not data.get("display_name"),
+    }
+
+
 def join_subreddit(driver: WebDriver, label: str, subreddit: str) -> str:
     """
     Click Join. Returns joined | already_joined | skipped | failed.
     """
-    if _already_joined(driver):
+    about = {}
+    try:
+        about = _about_join_state(driver, label, subreddit)
+    except Exception:
+        about = {}
+    if about.get("quarantine") or about.get("restricted"):
+        log(
+            f"[Profile {label}] r/{subreddit} is {about.get('kind') or 'blocked'} — not joining"
+        )
+        return "skipped"
+    if about.get("subscriber") or _already_joined(driver):
         log(f"[Profile {label}] Already a member of r/{subreddit} — skipping Join")
         return "already_joined"
 
@@ -5983,10 +6124,6 @@ def decide_join_policy(
     """
     name = normalize_subreddit(subreddit)
     state = _rl_state(stats, name, kind="join", rules=rules)
-    if join_status in {"joined", "already_joined"}:
-        _rl_learn(stats, state, f"join:{join_status}", REWARD_JOIN_OK)
-    elif join_status == "failed":
-        _rl_learn(stats, state, "join:failed", REWARD_JOIN_FAIL)
 
     policy = "comment"
     join_actions = ("join:comment", "join:lurk")
@@ -6014,6 +6151,7 @@ def decide_join_policy(
     flags = getattr(rules, "flags", None) or {}
     strict = float(getattr(rules, "strictness", 0) or 0)
     rules_limit = bool(flags.get("account_gate")) or strict >= 0.45
+    lurk_overridden = False
     if need_comment and policy == "lurk":
         # Sheet communities are how a low-karma account earns standing.
         # A careful/gated rule set still gets a comment, with a safer tone.
@@ -6025,12 +6163,17 @@ def decide_join_policy(
         )
         policy = "comment"
         chosen = "join:comment"
+        lurk_overridden = True
+        if name and name not in stats.pending_join_comment:
+            stats.pending_join_comment.append(name)
     elif policy == "lurk" and rules_limit:
         log(
             f"[Profile {stats.name}] r/{name} rules say be careful "
             "(karma, account age, or a strict community) — browsing only"
         )
 
+    if lurk_overridden:
+        return policy
     if policy == "lurk":
         reward = REWARD_JOIN_LURK_STRICT if strict >= 0.45 else -0.1
         if name and name not in stats.lurk_subs:
@@ -6117,6 +6260,19 @@ def _element_interest(driver: WebDriver, element: Any) -> float:
         return float(max(1, int(text or 1)))
     except Exception:
         return 1.0
+
+
+def _random_media_post_title(driver: WebDriver) -> Optional[Any]:
+    pool: List[Any] = []
+    for by, selector in POST_SELECTORS:
+        for element in _visible_elements(driver, by, selector, limit=12):
+            if _element_is_media_post(driver, element):
+                pool.append(element)
+        if len(pool) >= 6:
+            break
+    if not pool:
+        return None
+    return _rng().choice(pool)
 
 
 def _random_post_title(driver: WebDriver) -> Optional[Any]:
@@ -6374,6 +6530,7 @@ def _listing_posts_from_json(payload: Any) -> List[Dict[str, Any]]:
                 "body": re.sub(r"\s+", " ", str(item.get("selftext") or "")).strip()[:400],
                 "score": int(item.get("score") or 0),
                 "num_comments": int(item.get("num_comments") or 0),
+                "created_utc": float(item.get("created_utc") or 0),
                 "is_self": bool(item.get("is_self")),
                 "post_hint": str(item.get("post_hint") or ""),
             }
@@ -6524,25 +6681,29 @@ def pick_listing_post(
         url = str(row.get("url") or "")
         if already_commented_on(user_id, url):
             continue
+        try:
+            from reddit_joiner.store import thread_touched_by_any
+
+            if thread_touched_by_any(url) or link_commented_by_any_account(url):
+                continue
+        except Exception:
+            if link_commented_by_any_account(url):
+                continue
         if _is_media_listing_item(row):
             continue
         intent = _listing_post_intent(row)
         if not commentable_intent(intent):
             continue
         replies = _listing_replies(row)
-        if REQUIRE_POST_REPLIES and replies < MIN_POST_REPLIES:
-            if not _zero_comment_intent_ok(row, intent):
-                continue
+        created = float(row.get("created_utc") or 0)
+        age = (time.time() - created) if created > 0 else None
+        ok_thread, _why = warmup_ladder.comment_thread_ok(replies, age)
+        if not ok_thread:
+            continue
         eligible.append(row)
     if not eligible:
         return None
-    # Prefer empty intent threads first so we actually reply to new asks
-    zero_intent = [
-        row
-        for row in eligible
-        if _listing_replies(row) == 0 and _zero_comment_intent_ok(row)
-    ]
-    pool = (zero_intent or eligible)[:10]
+    pool = eligible[:10]
     style = _style()
     bias = style.listing_top_bias if style else 0.7
     weights: List[float] = []
@@ -6854,7 +7015,7 @@ def past_deadline() -> bool:
 def human_sleep(seconds: float, remaining: Optional[float] = None) -> float:
     """
     Sleep, clamped by both the caller's own budget and the sitting deadline, so
-    one long pause can never push a 5–10 min sitting over its time.
+    one long pause can never push a 6–15 min sitting over its time.
     """
     nap = max(0.0, float(seconds))
     try:
@@ -7940,53 +8101,215 @@ UPVOTE_CSS = [
 ]
 
 
+def _href_from_card(driver: WebDriver, element: Any) -> str:
+    """Permalink on a feed card or upvote button, if Reddit exposed one."""
+    href = ""
+    try:
+        href = element.get_attribute("href") or ""
+    except Exception:
+        href = ""
+    if "/comments/" not in str(href):
+        try:
+            href = driver.execute_script(
+                """
+                const el = arguments[0];
+                if (!el) return '';
+                const post = el.closest ? el.closest('shreddit-post, article') : null;
+                const perm = (post && (post.getAttribute('permalink')
+                    || post.getAttribute('content-href'))) || '';
+                const a = post && post.querySelector
+                    ? post.querySelector('a[href*="/comments/"]') : null;
+                return perm || (a && a.href) || '';
+                """,
+                element,
+            ) or ""
+        except Exception:
+            href = ""
+    return _normalize_post_url(str(href or ""))
+
+
+def _thread_already_touched(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        from reddit_joiner.store import thread_touched_by_any
+
+        return bool(thread_touched_by_any(url))
+    except Exception:
+        return False
+
+
+def _mark_thread_opened(
+    url: str, label: str = "", user_id: str = "", subreddit: str = ""
+) -> None:
+    if not url:
+        return
+    try:
+        from reddit_joiner.store import record_thread_touch
+
+        record_thread_touch(
+            url, account=label, user_id=user_id, kind="open", subreddit=subreddit
+        )
+    except Exception:
+        pass
+
+
+def _untouched_feed_post(driver: WebDriver, *, media: bool = False) -> Optional[Any]:
+    """A visible card our accounts have not opened or voted yet."""
+    pool: List[Any] = []
+    if media:
+        for by, selector in POST_SELECTORS:
+            for element in _visible_elements(driver, by, selector, limit=12):
+                if _element_is_media_post(driver, element):
+                    pool.append(element)
+            if len(pool) >= 8:
+                break
+    else:
+        for by, selector in POST_SELECTORS:
+            for element in _visible_elements(driver, by, selector, limit=12):
+                if _element_is_media_post(driver, element):
+                    continue
+                if not _element_has_replies(driver, element):
+                    continue
+                pool.append(element)
+            if len(pool) >= 8:
+                break
+    if not pool:
+        return None
+    _rng().shuffle(pool)
+    for element in pool:
+        url = _href_from_card(driver, element)
+        if url and _thread_already_touched(url):
+            continue
+        return element
+    return None
+
+
+def _unused_upvote_buttons(driver: WebDriver) -> List[Any]:
+    pool: List[Any] = []
+    for xpath in UPVOTE_XPATHS:
+        pool.extend(_visible_elements(driver, By.XPATH, xpath, limit=8))
+    for css in UPVOTE_CSS:
+        pool.extend(_visible_elements(driver, By.CSS_SELECTOR, css, limit=8))
+    unused: List[Any] = []
+    seen = set()
+    for button in pool:
+        try:
+            ident = id(button)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            pressed = (button.get_attribute("aria-pressed") or "").lower()
+            label_text = (button.get_attribute("aria-label") or "").lower()
+            if pressed == "true" or "downvote" in label_text or "upvoted" in label_text:
+                continue
+            unused.append(button)
+        except StaleElementReferenceException:
+            continue
+    return unused
+
+
+def _thread_url_from_page(driver: WebDriver) -> str:
+    try:
+        href = driver.execute_script(
+            """
+            const p = document.querySelector('shreddit-post');
+            const link = (p && (p.getAttribute('permalink') || p.getAttribute('content-href'))) || '';
+            const here = location.href || '';
+            return link || here;
+            """
+        )
+    except Exception:
+        href = ""
+    return _normalize_post_url(str(href or ""))
+
+
 def upvote_random_post(
     driver: WebDriver,
     label: str = "",
     stats: Optional[AccountSummary] = None,
+    *,
+    read_first: bool = False,
 ) -> bool:
     """Click a random un-upvoted upvote button. Never clicks downvote."""
     prefix = f"[Profile {label}] " if label else ""
-    if stats is not None and account_in_warmup(stats):
-        return False
+    if stats is not None:
+        allowed, why = warmup_ladder.may_upvote(stats.account_age_days)
+        if not allowed:
+            return False
+        if int(stats.upvote_target or 0) <= 0:
+            return False
+        if int(stats.upvotes or 0) >= int(stats.upvote_target):
+            return False
+        try:
+            from reddit_joiner.store import votes_today_for_account
+
+            today = votes_today_for_account(stats.user_id)
+            lo, hi = warmup_ladder.upvote_post_budget(stats.account_age_days)
+            if today >= max(int(hi), int(stats.upvote_target or hi)):
+                return False
+        except Exception:
+            pass
+    on_thread = False
+    try:
+        on_thread = "/comments/" in (driver.current_url or "").lower()
+    except Exception:
+        on_thread = False
+    url = _thread_url_from_page(driver) if on_thread else ""
+    if on_thread and url:
+        if _thread_already_touched(url):
+            log(f"{prefix}Upvote skipped — another account already touched this thread")
+            return False
+        if not read_first:
+            return False
     key = label or "browser"
     gap = _rng().uniform(*MIN_UPVOTE_GAP)
     if time.time() - _last_upvote_at.get(key, 0.0) < gap:
         return False
     ok = False
-    try:
-        if driver.execute_script(_UPVOTE_JS):
-            ok = True
-    except Exception:
-        pass
-    if not ok:
-        pool: List[Any] = []
-        for xpath in UPVOTE_XPATHS:
-            pool.extend(_visible_elements(driver, By.XPATH, xpath, limit=8))
-        for css in UPVOTE_CSS:
-            pool.extend(_visible_elements(driver, By.CSS_SELECTOR, css, limit=8))
-        unused = []
-        seen = set()
-        for button in pool:
-            try:
-                ident = id(button)
-                if ident in seen:
-                    continue
-                seen.add(ident)
-                pressed = (button.get_attribute("aria-pressed") or "").lower()
-                label_text = (button.get_attribute("aria-label") or "").lower()
-                if pressed == "true" or "downvote" in label_text or "upvoted" in label_text:
-                    continue
-                unused.append(button)
-            except StaleElementReferenceException:
+    if not on_thread:
+        unused = _unused_upvote_buttons(driver)
+        safe: List[Any] = []
+        for button in unused:
+            href = _href_from_card(driver, button)
+            if href and _thread_already_touched(href):
                 continue
-        if unused and human_click(driver, _rng().choice(unused)):
-            ok = True
+            safe.append((button, href))
+        if unused and not safe:
+            log(f"{prefix}Upvote skipped — visible posts were already touched")
+            return False
+        if safe:
+            button, feed_url = _rng().choice(safe)
+            if human_click(driver, button):
+                ok = True
+                url = feed_url or url
+    else:
+        try:
+            if driver.execute_script(_UPVOTE_JS):
+                ok = True
+        except Exception:
+            pass
+        if not ok:
+            unused = _unused_upvote_buttons(driver)
+            if unused and human_click(driver, _rng().choice(unused)):
+                ok = True
     if ok:
         _last_upvote_at[key] = time.time()
         log(f"{prefix}Upvoted a random post")
         if stats is not None:
             stats.upvotes += 1
+        if url and "/comments/" in url:
+            try:
+                from reddit_joiner.store import record_thread_touch
+
+                record_thread_touch(
+                    url,
+                    account=label,
+                    user_id=(stats.user_id if stats is not None else ""),
+                    kind="vote",
+                )
+            except Exception:
+                pass
         time.sleep(_rng().uniform(0.6, 1.8))
         return True
     return False
@@ -8691,10 +9014,12 @@ def comment_on_current_post(
 
     submitted = str(clicked).startswith("clicked") or clicked == "ctrl-enter"
     status = "missing"
+    thread_checked = False
     deadline = time.time() + 14.0
     while time.time() < deadline:
         status = _comment_landed(driver, body)
         if status == "visible":
+            thread_checked = True
             break
         if status == "blocked":
             log(f"{prefix}Comment did not land on Reddit (rate limited or blocked)")
@@ -8716,12 +9041,18 @@ def comment_on_current_post(
     if stats is not None:
         if count_session:
             stats.comments += 1
+        if thread_checked:
+            stats.comments_thread_visible += 1
         stats.last_comment_text = body
         stats.last_comment_url = extract_comment_permalink(
             driver, body, author=getattr(stats, "reddit_username", "")
         )
         if stats.last_comment_url:
             log(f"{prefix}Comment URL: {stats.last_comment_url}")
+        elif thread_checked:
+            log(f"{prefix}Comment seen on the thread — no permalink")
+        else:
+            log(f"{prefix}Comment counted as placed — thread check did not confirm it")
     time.sleep(_rng().uniform(3.5, 7.0))
     return True
 
@@ -8991,6 +9322,24 @@ def extract_opened_post(driver: WebDriver) -> Dict[str, str]:
     return {"title": title, "body": body, "url": url}
 
 
+def _opened_post_age_seconds(driver: WebDriver, url: str, label: str) -> Optional[float]:
+    json_url = (url or "").split("?")[0].rstrip("/")
+    if "/comments/" not in json_url:
+        return None
+    if not json_url.endswith(".json"):
+        json_url = json_url + ".json"
+    payload = reddit_session_json(driver, json_url, label)
+    listing = payload[0] if isinstance(payload, list) and payload else payload
+    data = listing.get("data") if isinstance(listing, dict) else None
+    children = data.get("children") if isinstance(data, dict) else None
+    if isinstance(children, list) and children:
+        post = children[0].get("data") if isinstance(children[0], dict) else {}
+        created = float(post.get("created_utc") or 0) if isinstance(post, dict) else 0.0
+        if created > 0:
+            return max(0.0, time.time() - created)
+    return None
+
+
 def _account_karma_age(stats: AccountSummary) -> Tuple[int, float]:
     try:
         karma = int(stats.account_karma or 0)
@@ -9004,21 +9353,27 @@ def _account_karma_age(stats: AccountSummary) -> Tuple[int, float]:
 
 
 def account_in_warmup(stats: AccountSummary) -> bool:
-    """True until the account is 4 days old. Then general activity is allowed."""
+    """True while comments are still locked (under day 8). Joins and later upvotes still run."""
     allowed, _why = account_may_general_comment(stats)
     return not allowed
 
 
 def warmup_reason(stats: AccountSummary) -> str:
     _allowed, why = account_may_general_comment(stats)
-    return why or (
-        f"warmup — need {GENERAL_COMMENT_MIN_AGE_DAYS} days for general activity"
-    )
+    return why or warmup_ladder.day_band_label(stats.account_age_days)
 
 
-def may_join_now(stats: AccountSummary, *, for_post: bool = False) -> Tuple[bool, str]:
-    if account_in_warmup(stats):
-        return False, warmup_reason(stats)
+def _join_cycle_iso() -> str:
+    return _CYCLE_STARTED_ISO or datetime.now().strftime("%Y-%m-%dT00:00:00")
+
+
+def may_join_now(
+    stats: AccountSummary, subreddit: str = "", *, for_post: bool = False
+) -> Tuple[bool, str]:
+    age = float(stats.account_age_days or 0)
+    allowed, why = warmup_ladder.may_join(age, subreddit)
+    if not allowed:
+        return False, why
     if for_post:
         return True, ""
     if len(stats.joined) >= MAX_JOINS_PER_SESSION:
@@ -9026,6 +9381,18 @@ def may_join_now(stats: AccountSummary, *, for_post: bool = False) -> Tuple[bool
             False,
             f"already joined {len(stats.joined)} community this sitting",
         )
+    name = normalize_subreddit(subreddit).lower()
+    if name:
+        try:
+            from reddit_joiner.store import first_three_join_set, joined_subs_for_account, joins_this_cycle_for_sub
+
+            mine = {item.lower() for item in joined_subs_for_account(stats.user_id)}
+            if len(mine) < 3 and name not in mine and name in first_three_join_set():
+                return False, f"r/{name} is already in another account's first 3 subs"
+            if joins_this_cycle_for_sub(name, _join_cycle_iso()) >= MAX_JOINS_SAME_SUB_PER_CYCLE:
+                return False, f"already {MAX_JOINS_SAME_SUB_PER_CYCLE} of our accounts joined r/{name} this cycle"
+        except Exception:
+            pass
     return True, ""
 
 
@@ -9037,8 +9404,8 @@ def join_if_allowed(
     *,
     for_post: bool = False,
 ) -> str:
-    allowed, reason = may_join_now(stats, for_post=for_post)
     name = normalize_subreddit(subreddit)
+    allowed, reason = may_join_now(stats, name, for_post=for_post)
     if not allowed:
         log(f"[Profile {label}] Not joining r/{name} — {reason}")
         return "skipped"
@@ -9046,9 +9413,7 @@ def join_if_allowed(
 
 
 def _too_new_for_general_comment(stats: AccountSummary) -> bool:
-    """True until the account is 4 days old."""
-    allowed, _why = account_may_general_comment(stats)
-    return not allowed
+    return account_in_warmup(stats)
 
 
 def maybe_ai_comment_on_opened_post(
@@ -9076,7 +9441,9 @@ def maybe_ai_comment_on_opened_post(
         log(f"{prefix}Comment skipped — {warmup_reason(stats)}")
         return False
     if kind != "sheet":
-        target = stats.session_comment_target or SESSION_COMMENT_CAP
+        target = int(stats.session_comment_target or 0)
+        if target <= 0:
+            return False
         have_week, room = general_comment_need(user_id, session_want=target)
         if room <= 0:
             log(
@@ -9149,9 +9516,19 @@ def maybe_ai_comment_on_opened_post(
     ):
         log(f"{prefix}Comment skipped — already commented on this post")
         return False
-    if kind == "sheet" and link_commented_by_any_account(url):
-        log(f"{prefix}Comment skipped — another account already commented on this link")
-        return False
+    try:
+        from reddit_joiner.store import record_thread_touch, thread_touched_by_any
+
+        if thread_touched_by_any(url) or link_commented_by_any_account(url):
+            log(f"{prefix}Comment skipped — another account already touched this thread")
+            return False
+        record_thread_touch(
+            url, account=label, user_id=user_id, kind="open", subreddit=subreddit
+        )
+    except Exception:
+        if link_commented_by_any_account(url):
+            log(f"{prefix}Comment skipped — another account already commented on this link")
+            return False
     try:
         from reddit_joiner.ai import analyze_post, generate_ai_comment
     except ImportError as exc:
@@ -9196,9 +9573,27 @@ def maybe_ai_comment_on_opened_post(
         )
     except Exception:
         page_replies = -1
-    if kind != "sheet" and page_replies == 0:
-        log(f"{prefix}Empty thread + {intent} post — commenting anyway")
-        force = True
+    if kind != "sheet":
+        created_age = _opened_post_age_seconds(driver, url, label)
+        replies = page_replies
+        if replies < 0 and created_age is None:
+            log(f"{prefix}Comment skipped — could not read thread age or reply count")
+            return False
+        if replies < 0:
+            replies = 1
+        ok_thread, why_thread = warmup_ladder.comment_thread_ok(replies, created_age)
+        if not ok_thread:
+            log(f"{prefix}Comment skipped — {why_thread}")
+            return False
+        members = {
+            normalize_subreddit(name).lower()
+            for name in (stats.joined + stats.already_member)
+        }
+        if subreddit and subreddit.lower() not in members:
+            about = _about_join_state(driver, label, subreddit)
+            if not about.get("subscriber"):
+                log(f"{prefix}Comment skipped — not a member of r/{subreddit}")
+                return False
     rules = _rules_for(stats, subreddit)
     if rules is None and subreddit:
         try:
@@ -9215,11 +9610,21 @@ def maybe_ai_comment_on_opened_post(
             f"{prefix}Comment skipped — r/{subreddit} rules are questions only"
         )
         return False
-    if kind != "sheet" and rule_flags.get("account_gate") and _too_new_for_general_comment(stats):
-        log(
-            f"{prefix}Comment skipped — r/{subreddit} rules want karma or account age"
+    if kind != "sheet" and rule_flags.get("account_gate"):
+        gate_reason = _account_rejected_by_community(
+            driver, label, subreddit, stats, rules
         )
-        return False
+        if gate_reason:
+            log(
+                f"{prefix}Comment skipped — r/{subreddit} rules reject this account "
+                f"({gate_reason})"
+            )
+            return False
+        if _too_new_for_general_comment(stats):
+            log(
+                f"{prefix}Comment skipped — r/{subreddit} rules want karma or account age"
+            )
+            return False
     time.sleep(human.gaussian_between(*POST_READ_WAIT))
     # Read scaled to how long the post actually is, then think it over
     read_opened_thread(driver, 0.0, label)
@@ -9236,54 +9641,108 @@ def maybe_ai_comment_on_opened_post(
     tone = "neutral" if mood == "negative" else "friendly"
     action = f"comment:{tone}"
     state = _rl_state(stats, subreddit, title, body, sentiment=score, kind=kind, rules=rules)
-    agent = _rl_agent()
-    if agent is not None and RL_ENABLED:
-        try:
-            from reddit_joiner.rl import parse_comment_action
-
-            choices = _rl_comment_choices(rules, force=force, subreddit=subreddit)
-            chosen = agent.choose_action(state, choices)
-            action = chosen or action
-            should, tone = parse_comment_action(action)
-            log(f"{prefix}RL comment action: {action} (ε={agent.epsilon:.3f})")
-            if not should:
-                _rl_learn(stats, state, action, 0.0, train=False)
-                return False
-        except Exception as exc:
-            log(f"{prefix}RL comment choice skipped ({brief_error(exc)})")
-
-    try:
-        from reddit_joiner.rules import safer_tone
-
-        fitted = safer_tone(rules, tone)
-        if fitted != tone:
-            log(f"{prefix}r/{subreddit} rules discourage {tone} — using {fitted}")
-            _rl_learn(stats, state, action, REWARD_RULES_TONE_CLASH, train=False)
-            tone = fitted
-            action = f"comment:{tone}"
-        elif rules is not None:
-            _rl_learn(stats, state, action, REWARD_RULES_TONE_FIT, train=False)
-    except Exception:
-        pass
-
+    example = live_comment_example(subreddit)
     text = ""
     provider = ""
-    example = live_comment_example(subreddit)
-    try:
-        text, provider = generate_ai_comment(
-            title,
-            body,
-            subreddit=subreddit,
-            tone=tone,
-            analysis=analysis,
-            rules=getattr(rules, "prompt_text", lambda: "")(),
-            example=example,
-        )
-    except Exception as exc:
-        log(f"{prefix}Comment skipped — model failed ({brief_error(exc)})")
-        return False
-    if len(re.findall(r"[A-Za-z]", text or "")) < 18:
-        log(f"{prefix}Comment skipped — generated text was too short")
+    excluded: List[str] = []
+    for attempt in range(2):
+        agent = _rl_agent()
+        if agent is not None and RL_ENABLED:
+            try:
+                from reddit_joiner.rl import parse_comment_action
+
+                force_now = bool(force) and not (
+                    kind != "sheet" and _too_new_for_general_comment(stats)
+                )
+                choices = _rl_comment_choices(
+                    rules,
+                    force=force_now,
+                    subreddit=subreddit,
+                    exclude=excluded,
+                    stats=stats,
+                )
+                if attempt and not any(item.startswith("comment:") for item in choices):
+                    log(f"{prefix}Comment skipped — no other allowed tone left")
+                    return False
+                chosen = agent.choose_action(state, choices)
+                action = chosen or action
+                should, tone = parse_comment_action(action)
+                log(
+                    f"{prefix}RL comment action: {action} "
+                    f"(ε={agent.epsilon:.3f}"
+                    f"{', retry' if attempt else ''})"
+                )
+                if not should:
+                    _rl_learn(stats, state, action, 0.0, train=False)
+                    return False
+            except Exception as exc:
+                log(f"{prefix}RL comment choice skipped ({brief_error(exc)})")
+        pending = normalize_subreddit(subreddit)
+        if pending and pending in (stats.pending_join_comment or []):
+            join_state = _rl_state(stats, pending, kind="join", rules=rules)
+            _rl_learn(
+                stats,
+                join_state,
+                "join:comment",
+                REWARD_JOIN_COMMENT_OPEN,
+                next_actions=["join:comment", "join:lurk"],
+            )
+            stats.pending_join_comment = [
+                item for item in stats.pending_join_comment if item != pending
+            ]
+        try:
+            from reddit_joiner.rules import safer_tone
+
+            fitted = safer_tone(rules, tone)
+            if fitted != tone:
+                log(f"{prefix}r/{subreddit} rules discourage {tone} — using {fitted}")
+                _rl_learn(
+                    stats, state, action, REWARD_RULES_TONE_CLASH, graded=False
+                )
+                tone = fitted
+                action = f"comment:{tone}"
+            elif rules is not None:
+                _rl_learn(
+                    stats, state, action, REWARD_RULES_TONE_FIT, graded=False
+                )
+        except Exception:
+            pass
+        try:
+            text, provider = generate_ai_comment(
+                title,
+                body,
+                subreddit=subreddit,
+                tone=tone,
+                analysis=analysis,
+                rules=getattr(rules, "prompt_text", lambda: "")(),
+                example=example,
+            )
+        except Exception as exc:
+            log(f"{prefix}Comment draft failed ({brief_error(exc)})")
+            _rl_learn(
+                stats, state, action, REWARD_COMMENT_FAILED, graded=False
+            )
+            excluded.append(tone)
+            excluded.append(action)
+            if attempt == 0:
+                log(f"{prefix}Trying another tone on the same post")
+                continue
+            log(f"{prefix}Comment skipped — model failed")
+            return False
+        if len(re.findall(r"[A-Za-z]", text or "")) < 18:
+            log(f"{prefix}Comment draft was too short")
+            _rl_learn(
+                stats, state, action, REWARD_COMMENT_FAILED, graded=False
+            )
+            excluded.append(tone)
+            excluded.append(action)
+            if attempt == 0:
+                log(f"{prefix}Trying another tone on the same post")
+                continue
+            log(f"{prefix}Comment skipped — generated text was too short")
+            return False
+        break
+    else:
         return False
     log(
         f"{prefix}Commenting on this post ({provider}, {mood}): {text[:90]}"
@@ -9296,6 +9755,14 @@ def maybe_ai_comment_on_opened_post(
             stats.ai_comments += 1
         stats.last_comment_text = text
         record_account_comment(user_id, url, text, kind=kind)
+        try:
+            from reddit_joiner.store import record_thread_touch
+
+            record_thread_touch(
+                url, account=label, user_id=user_id, kind="comment", subreddit=subreddit
+            )
+        except Exception:
+            pass
         if kind == "karma":
             stats.karma_comments += 1
         posted_state = _rl_state(
@@ -9465,11 +9932,30 @@ def perform_browse_activity(
     comments_left = 0
     last_pulse = 0.0
     pulse_every = (style.pulse_every if style else 30.0) if duration >= 60 else 8.0
+    menu = _activity_menu(style)
+    muted = set(menu.muted)
+    actions = [name for name in menu.browse_order if name not in muted] or ["scroll"]
+    action_i = 0
     minutes = max(0.0, float(duration)) / 60.0
     if minutes >= 1.5:
         log(f"{prefix}browsing — {minutes:.0f} min")
     else:
         log(f"{prefix}browsing — {int(max(0, duration))}s")
+
+    def _do_scroll(left: float) -> None:
+        maybe_human_side_trip(driver, label, stats, left, recover_url)
+        left = end_at - time.time()
+        roll = _rng().random()
+        if roll < down_share:
+            _scroll_flicks(driver, scroll_down_px, 1, left)
+        elif roll < down_share + up_share:
+            _scroll_flicks(driver, scroll_up_px, -1, min(left, 3.0))
+        elif roll < down_share + up_share + wander_share:
+            _mouse_wander(driver)
+        elif _rng().random() < 0.35 and left > 8:
+            human_sleep(_rng().uniform(2.5, 8.0), left)
+        _reading_pause(end_at - time.time())
+
     while time.time() < end_at:
         remaining = end_at - time.time()
         if remaining <= 0:
@@ -9492,56 +9978,63 @@ def perform_browse_activity(
                 log(f"{prefix}browsing — {int(remaining)}s left")
             last_pulse = now
 
-        if _rng().random() < break_chance and remaining > 35:
+        action = actions[action_i % len(actions)]
+        action_i += 1
+        remaining = end_at - time.time()
+        if action == "break" and remaining > 35 and _rng().random() < max(break_chance, 0.22):
             pause = min(_rng().uniform(*human_break), remaining - 8.0)
             log(f"{prefix}Sitting still for {pause:.0f}s")
             time.sleep(max(4.0, pause))
-            remaining = end_at - time.time()
-
-        maybe_human_side_trip(driver, label, stats, remaining, recover_url)
-        remaining = end_at - time.time()
-
-        roll = _rng().random()
-        if roll < down_share:
-            _scroll_flicks(driver, scroll_down_px, 1, remaining)
-        elif roll < down_share + up_share:
-            _scroll_flicks(driver, scroll_up_px, -1, min(remaining, 3.0))
-        elif roll < down_share + up_share + wander_share:
-            _mouse_wander(driver)
-        elif _rng().random() < 0.35 and remaining > 8:
-            human_sleep(_rng().uniform(2.5, 8.0), remaining)
-        remaining = end_at - time.time()
-        _reading_pause(remaining)
-
-        remaining = end_at - time.time()
-        if remaining <= 0:
-            break
-        if _rng().random() < upvote_chance:
+        elif action == "upvote" and _rng().random() < max(upvote_chance, 0.18):
             upvote_random_post(driver, label, stats)
-
-        if _rng().random() < hover_chance:
+        elif action == "hover" and _rng().random() < max(hover_chance, 0.28):
             link = _random_link(driver)
             if link is not None:
                 _hover(driver, link)
                 time.sleep(min(_rng().uniform(0.5, 1.6), max(0.1, end_at - time.time())))
-
-        remaining = end_at - time.time()
-        if _rng().random() < open_chance and remaining > 28:
-            post = _random_post_title(driver)
+            else:
+                _do_scroll(remaining)
+        elif action == "open-post" and remaining > 28 and _rng().random() < max(open_chance, 0.22):
+            watch_media = _rng().random() < 0.22
+            post = _untouched_feed_post(driver, media=watch_media)
             if post is None:
+                _do_scroll(remaining)
                 continue
-            log(f"{prefix}Opening a random post to read")
+            opened_url = _href_from_card(driver, post)
+            log(
+                f"{prefix}Opening a random {'video/gallery' if watch_media else 'post'} to read"
+            )
             if not human_click(driver, post):
+                _do_scroll(remaining)
                 continue
+            if not opened_url:
+                opened_url = _thread_url_from_page(driver)
+            if opened_url and _thread_already_touched(opened_url):
+                log(f"{prefix}Left that thread — another account already touched it")
+                leave_opened_page(driver, label, recover_url=recover_url)
+                _do_scroll(remaining)
+                continue
+            _mark_thread_opened(
+                opened_url,
+                label,
+                user_id or (stats.user_id if stats is not None else ""),
+            )
             time.sleep(min(_rng().uniform(*post_load), remaining - 12.0))
             dismiss_popups(driver)
+            if watch_media:
+                human_sleep(min(_rng().uniform(8.0, 25.0), max(4.0, end_at - time.time() - 6.0)))
+                if stats is not None:
+                    stats.media_watched += 1
+                leave_opened_page(driver, label, recover_url=recover_url)
+                continue
             read_opened_thread(
                 driver,
                 min(_rng().uniform(*thread_read), max(8.0, end_at - time.time() - 10.0)),
                 label,
             )
-            if UPVOTE_ON_OPENED_POST and _rng().random() < opened_up:
-                upvote_random_post(driver, label, stats)
+            if UPVOTE_ON_OPENED_POST and "upvote" not in muted and _rng().random() < opened_up:
+                upvote_random_post(driver, label, stats, read_first=True)
+            maybe_follow_commenter(driver, label, stats)
             if comments_left > 0 and remaining > 40 and _rng().random() < AI_COMMENT_CHANCE:
                 try:
                     if maybe_ai_comment_on_opened_post(driver, label, user_id, stats, kind="browse"):
@@ -9556,6 +10049,8 @@ def perform_browse_activity(
                     log(f"{prefix}AI comment skipped ({brief_error(exc)})")
             leave_opened_page(driver, label, recover_url=recover_url)
             time.sleep(min(_rng().uniform(1.2, 3.0), max(0.1, end_at - time.time())))
+        else:
+            _do_scroll(remaining)
 
 
 def perform_human_activity(
@@ -9662,7 +10157,7 @@ def perform_human_activity(
                         label,
                     )
                     if allow_upvote and UPVOTE_ON_OPENED_POST and _rng().random() < opened_up:
-                        upvote_random_post(driver, label, stats)
+                        upvote_random_post(driver, label, stats, read_first=True)
                         time.sleep(min(_rng().uniform(0.8, 2.0), max(0.1, end_at - time.time())))
                     if (
                         allow_comment
@@ -11486,6 +11981,9 @@ def apply_account_analysis(stats: AccountSummary, info: Dict[str, Any]) -> None:
     stats.reddit_username = str(info.get("username") or "")
     stats.account_karma = int(info.get("karma") or 0)
     stats.account_age_days = float(info.get("age_days") or 0.0)
+    if stats.reddit_username:
+        with _CYCLE_LOCK:
+            _KNOWN_USERNAMES.add(stats.reddit_username.lower())
     try:
         from reddit_joiner.karma import account_tier
 
@@ -11968,6 +12466,12 @@ def analyze_subreddit_for_account(
 def _record_join(stats: AccountSummary, subreddit: str, join_status: str) -> None:
     if join_status == "joined" and subreddit not in stats.joined:
         stats.joined.append(subreddit)
+        try:
+            from reddit_joiner.store import record_account_join
+
+            record_account_join(stats.user_id, subreddit, account=stats.name)
+        except Exception:
+            pass
     elif (
         join_status == "already_joined"
         and subreddit not in stats.already_member
@@ -11990,7 +12494,10 @@ def maybe_karma_growth_comments(
         return
     if not KARMA_GROWTH_ENABLED:
         return
-    target = stats.session_comment_target or _rng().randint(*SESSION_GENERAL_COMMENTS)
+    target = int(stats.session_comment_target or 0)
+    if target <= 0:
+        stats.karma_comment_note = "this sitting: skip comment"
+        return
     have, room = general_comment_need(user_id, session_want=target)
     need = min(room, max(0, target - stats.comments))
     if need <= 0:
@@ -12656,14 +13163,20 @@ def maybe_submit_weekly_post(
                         reason=last_reason,
                         original_subreddit=subreddit,
                     )
-                _rl_learn(
-                    stats,
-                    target_state,
-                    target_action,
-                    REWARD_POST_REMOVED_SPAM,
-                    next_actions=list(POST_ACTIONS),
-                    graded=True,
-                )
+                if composer_miss:
+                    log(
+                        f"[Profile {label}] Composer miss on r/{target} — "
+                        "not training as spam, trying the next community"
+                    )
+                else:
+                    _rl_learn(
+                        stats,
+                        target_state,
+                        target_action,
+                        REWARD_POST_REMOVED_SPAM,
+                        next_actions=list(POST_ACTIONS),
+                        graded=True,
+                    )
                 continue
             log(f"[Profile {label}] Waiting {POST_STATUS_WAIT}s then checking if the post is LIVE")
             time.sleep(POST_STATUS_WAIT)
@@ -12798,13 +13311,24 @@ def maybe_do_session_post(
         return
     allowed_post, post_why = account_may_post(stats)
     has_sheet = bool(_sheet_post_communities(user_id, label, serial))
+    live_subs: List[str] = []
+    try:
+        from reddit_joiner.store import surviving_comment_subs
+
+        live_subs = surviving_comment_subs(user_id)
+    except Exception:
+        live_subs = []
     log(
         f"[Profile {label}] Mid-session post "
         f"(1 attempt this run, max {POSTS_PER_WINDOW} LIVE/{ACTION_WINDOW_HOURS:.0f}h, "
-        f"karma {stats.account_karma}/{MIN_KARMA_TO_POST}"
+        f"karma {stats.account_karma}/{MIN_KARMA_TO_POST}, "
+        f"{warmup_ladder.day_band_label(stats.account_age_days)}"
         + (", sheet row assigned" if has_sheet else ", no posts.csv row")
         + ")"
     )
+    if allowed_post and not live_subs:
+        allowed_post = False
+        post_why = "need a surviving comment in the community before posting"
     if has_sheet:
         if not allowed_post:
             if done:
@@ -12876,6 +13400,9 @@ def maybe_do_session_post(
         _add(raw)
     for raw in allowed_subreddits():
         _add(raw)
+    if live_subs:
+        live_set = {name.lower() for name in live_subs}
+        ordered = [name for name in ordered if name.lower() in live_set]
     if not ordered:
         stats.post_status = "skipped"
         stats.post_note = "no subreddits.csv community for a general post"
@@ -12997,8 +13524,30 @@ def process_profile(
         return stats
 
     try:
+        from reddit_joiner.store import get_account_outside_status
+
+        outside = get_account_outside_status(user_id)
+    except Exception:
+        outside = ""
+    if outside in {"BANNED", "SUSPENDED"}:
+        stats.account_status = (
+            "the account is suspended" if outside == "SUSPENDED" else "the account is banned"
+        )
+        log(
+            f"[Profile {label}] Skipping — outside lookup {outside} "
+            "(not opening AdsPower)"
+        )
+        try:
+            disable_account_in_sheet(user_id, reason=f"outside lookup {outside}")
+        except Exception:
+            pass
+        stats.print_report()
+        return stats
+
+    try:
         begin_session_rng(user_id, label)
         _tls.batch_user_id = user_id
+        open_deadline = time.time() + float(warmup_ladder.HUNG_START_SECONDS)
         try:
             data = start_profile(
                 user_id,
@@ -13017,6 +13566,11 @@ def process_profile(
                 "sitting not counted, will retry later"
             )
             return stats
+        if time.time() > open_deadline:
+            log(f"[Profile {label}] Hung start — closing before login")
+            stats.sitting_ok = False
+            stats.post_note = "hung start"
+            return stats
         raise_profile_browser(label)
         wait_for_proxy_ip(driver, label, user_id)
 
@@ -13028,6 +13582,7 @@ def process_profile(
             if not blocked:
                 raise
             stats.account_status = blocked
+            persist_inside_ban(user_id, blocked)
             log(f"[Profile {label}] Closing this account — {blocked}")
             stats.print_report()
             return stats
@@ -13041,6 +13596,7 @@ def process_profile(
             info = {}
         if info.get("suspended"):
             stats.account_status = "the account is banned"
+            persist_inside_ban(user_id, "the account is suspended")
             who = f"u/{stats.reddit_username} " if stats.reddit_username else ""
             log(f"[Profile {label}] Account check: {who}account banned — closing")
             stats.print_report()
@@ -13048,8 +13604,14 @@ def process_profile(
         blocked = account_ban_reason(driver, label, stats, info, logged_in)
         if blocked:
             stats.account_status = blocked
+            persist_inside_ban(user_id, blocked)
             log(f"[Profile {label}] Closing this account — {blocked}")
             stats.print_report()
+            return stats
+        if time.time() > open_deadline:
+            log(f"[Profile {label}] Hung start — Reddit did not finish login in 3 min")
+            stats.sitting_ok = False
+            stats.post_note = "hung start"
             return stats
         if logged_in:
             log(f"[Profile {label}] Account check: u/{stats.reddit_username} is not banned")
@@ -13072,8 +13634,41 @@ def process_profile(
         )
         if not account_may_search(user_id):
             style.search_n = 0
+            style.menu.search_when = "none"
         else:
             style.search_n = max(1, min(int(style.search_n or 1), 1))
+            if style.menu.search_when == "none":
+                style.menu.search_when = _rng().choice(("after_home", "after_first_hop"))
+        style.session_seconds = warmup_ladder.scale_sitting_seconds(
+            style.session_seconds, stats.account_age_days
+        )
+        stats.upvote_target = warmup_ladder.pick_upvote_target(stats.account_age_days)
+        young_band = warmup_ladder.day_band(stats.account_age_days)
+        if young_band == "days_1_3":
+            muted = [name for name in style.menu.muted if name]
+            if "open-post" not in muted:
+                muted.append("open-post")
+            style.menu.muted = tuple(muted)
+            style.explore_n = 0
+            style.click_post_chance = min(float(style.click_post_chance), 0.05)
+            style.community_post_chance = min(float(style.community_post_chance), 0.08)
+            log(
+                f"[Profile {label}] Days 1-3 quiet sitting — Home first, "
+                "no Join, few post opens, no explore"
+            )
+        if int(stats.upvote_target or 0) <= 0:
+            muted = [name for name in style.menu.muted if name]
+            if "upvote" not in muted:
+                muted.append("upvote")
+            style.menu.muted = tuple(muted)
+            upvote_note = "this sitting: skip upvotes"
+        else:
+            n = int(stats.upvote_target)
+            upvote_note = f"this sitting: {n} upvote{'s' if n != 1 else ''}"
+        log(
+            f"[Profile {label}] {warmup_ladder.day_band_label(stats.account_age_days)} "
+            f"— sitting {style.session_seconds / 60:.1f} min, {upvote_note}"
+        )
         set_current_style(style)
         session_start = time.time()
         stats.session_started_at = session_start
@@ -13100,6 +13695,7 @@ def process_profile(
         )
         if style.search_n <= 0:
             log(f"[Profile {label}] No sentence search this sitting — only 2 accounts per batch search")
+        log(f"[Profile {label}] Activity this sitting: {style.menu.describe(style.explore_n, style.search_n)}")
 
         serial = profile.get("serial_number") or ""
         session_post_done = [False]
@@ -13113,6 +13709,12 @@ def process_profile(
             for name in browse_list
             if name and normalize_subreddit(name).lower() in allowed_set
         ]
+        if young_band == "days_1_3":
+            _rng().shuffle(browse_list)
+            if not browse_list or _rng().random() < 0.35:
+                browse_list = []
+            else:
+                browse_list = browse_list[:1]
         hops = list(browse_list)
         sheet_slots = unused_sheet_comment_slots(user_id, name=label, serial=serial)
         has_sheet_links = sheet_slots > 0
@@ -13129,6 +13731,10 @@ def process_profile(
             stats.session_comment_target = 0
             general_room = 0
             stats.karma_comment_note = warmup_reason(stats)
+        elif int(stats.session_comment_target or 0) <= 0:
+            log(f"[Profile {label}] this sitting: skip comment")
+        else:
+            log(f"[Profile {label}] this sitting: 1 general comment")
         has_sheet_post = bool(_sheet_post_communities(user_id, label, serial))
         sheet_target = (
             _primary_sheet_post_subreddit(user_id, label, serial)
@@ -13138,7 +13744,7 @@ def process_profile(
         comment_slots: set = set()
         wait_h = hours_until_comment_room(user_id)
         log(
-            f"[Profile {label}] 48h budget: {comment_room}/{COMMENTS_PER_WINDOW} comments, "
+            f"[Profile {label}] Daily budget: {comment_room}/{COMMENTS_PER_WINDOW} comments, "
             f"{post_room}/{POSTS_PER_WINDOW} posts left"
         )
         if comment_room <= 0:
@@ -13186,20 +13792,19 @@ def process_profile(
             log(
                 f"[Profile {label}] Post already used in the last {ACTION_WINDOW_HOURS:.0f}h — browse only"
             )
-        sheet_n = max(1, len(browse_list))
-        explore_target = (EXPLORE_SHARE * sheet_n) / (1.0 - EXPLORE_SHARE)
-        want_explore = max(1, int(round(explore_target)))
-        if account_in_warmup(stats):
-            want_explore = 0
-            log(
-                f"[Profile {label}] Warmup — no extra communities this sitting"
-            )
+        want_explore = max(0, int(style.explore_n or 0))
         expected_hops = max(1, len(browse_list) + want_explore)
-        log(
-            f"[Profile {label}] Exploration {EXPLORE_SHARE:.0%} — "
-            f"{want_explore} extra communit{'y' if want_explore == 1 else 'ies'}, "
-            f"{len(browse_list)} from subreddits.csv"
-        )
+        if want_explore:
+            log(
+                f"[Profile {label}] Exploration — "
+                f"{want_explore} extra communit{'y' if want_explore == 1 else 'ies'}, "
+                f"{len(browse_list)} from subreddits.csv"
+            )
+        else:
+            log(
+                f"[Profile {label}] No random explore this sitting — "
+                f"{len(browse_list)} from subreddits.csv"
+            )
         home_first, home_between = plan_home_budget(
             style.session_seconds,
             expected_hops,
@@ -13225,15 +13830,28 @@ def process_profile(
             style.home_first_seconds,
             "first Home stretch",
         )
-        home_seconds += maybe_search_posts_on_new(
-            driver,
-            label,
-            stats,
-            session_end - time.time(),
-            max(0, int(style.search_n)),
-        )
+        search_done = [False]
+
+        def _run_menu_search() -> None:
+            if search_done[0] or max(0, int(style.search_n)) <= 0:
+                return
+            if session_end - time.time() < SEARCH_MIN_REMAINING:
+                return
+            used = maybe_search_posts_on_new(
+                driver,
+                label,
+                stats,
+                session_end - time.time(),
+                max(0, int(style.search_n)),
+            )
+            nonlocal home_seconds
+            home_seconds += used
+            search_done[0] = True
+
+        if style.menu.search_when == "after_home":
+            _run_menu_search()
         explore: List[str] = []
-        if EXPLORE_RANDOM_SUBS:
+        if EXPLORE_RANDOM_SUBS and want_explore > 0:
             # Sheet communities stay on the general-activity list. Random
             # explores skip whatever this account joined last sitting, then
             # those names are eligible again the sitting after that.
@@ -13345,7 +13963,9 @@ def process_profile(
             comment_slots = set(_rng().sample(comment_indexes, slot_count))
         explore_keys = {item.lower() for item in explore}
         log(
-            f"[Profile {label}] Random order ({EXPLORE_SHARE:.0%} exploration): "
+            f"[Profile {label}] Random hop order"
+            + (f" ({len(explore)} explore)" if explore else "")
+            + ": "
             + " → ".join(
                 "r/" + name + (" (explore)" if name.lower() in explore_keys else "")
                 for name in hops
@@ -13414,6 +14034,18 @@ def process_profile(
                     "before the hops — will still post later if there is time"
                 )
         deferred_hops: set = set()
+        visited_hops: List[str] = []
+        first_hop_attempted = [False]
+
+        def _after_first_hop_attempt() -> None:
+            if first_hop_attempted[0]:
+                return
+            first_hop_attempted[0] = True
+            if style.menu.search_when == "after_first_hop":
+                _run_menu_search()
+
+        if not hops and style.menu.search_when == "after_first_hop":
+            _run_menu_search()
         for index, subreddit in enumerate(hops, start=1):
             remaining = session_end - time.time()
             if stop_requested():
@@ -13497,7 +14129,9 @@ def process_profile(
                             f"[Profile {label}] Skipping r/{subreddit} — another account "
                             "still has it open"
                         )
+                    _after_first_hop_attempt()
                     continue
+                visited_hops.append(subreddit)
                 try:
                     url = driver.current_url or community_entry_url(subreddit)
                 except Exception:
@@ -13518,13 +14152,32 @@ def process_profile(
                 # The rules page costs real seconds. Open it where it matters —
                 # sheet communities and anywhere a comment is planned — and read
                 # cached/JSON rules only for a quick explore taste.
-                rules = read_subreddit_rules(
-                    driver,
-                    label,
-                    subreddit,
-                    stats,
-                    open_page=is_sheet or comment_planned,
+                skip_rules = (
+                    (not is_sheet)
+                    and (not comment_planned)
+                    and bool(style.menu.skip_rules_on_explore)
                 )
+                skip_join = (
+                    (not is_sheet)
+                    and (not comment_planned)
+                    and bool(style.menu.skip_join_on_explore)
+                )
+                if skip_rules:
+                    from reddit_joiner.rules import empty_rules
+
+                    rules = empty_rules(subreddit, source="skipped")
+                    log(
+                        f"[Profile {label}] Skipping r/{subreddit} rules — "
+                        "browse-only explore this sitting"
+                    )
+                else:
+                    rules = read_subreddit_rules(
+                        driver,
+                        label,
+                        subreddit,
+                        stats,
+                        open_page=is_sheet or comment_planned,
+                    )
                 try:
                     read_state = _rl_state(stats, subreddit, kind="rules", rules=rules)
                     if getattr(rules, "rule_count", 0):
@@ -13541,22 +14194,30 @@ def process_profile(
                         f"({brief_error(exc)})"
                     )
 
-                try:
-                    join_status = join_if_allowed(driver, label, stats, subreddit)
-                    if join_status == "joined":
-                        stats.joined.append(subreddit)
-                    elif join_status == "already_joined":
-                        stats.already_member.append(subreddit)
-                    elif join_status != "skipped":
-                        stats.join_failed.append(subreddit)
-                    policy = decide_join_policy(stats, subreddit, join_status, rules)
-                except Exception as exc:
-                    join_status = "failed"
-                    policy = "comment"
+                if skip_join:
+                    join_status = "skipped"
+                    policy = "lurk"
                     log(
-                        f"[Profile {label}] Join on r/{subreddit} skipped "
-                        f"({brief_error(exc)}) — still browsing"
+                        f"[Profile {label}] Browse-only explore in r/{subreddit} — "
+                        "not joining this sitting"
                     )
+                else:
+                    try:
+                        join_status = join_if_allowed(driver, label, stats, subreddit)
+                        if join_status == "joined":
+                            stats.joined.append(subreddit)
+                        elif join_status == "already_joined":
+                            stats.already_member.append(subreddit)
+                        elif join_status != "skipped":
+                            stats.join_failed.append(subreddit)
+                        policy = decide_join_policy(stats, subreddit, join_status, rules)
+                    except Exception as exc:
+                        join_status = "failed"
+                        policy = "comment"
+                        log(
+                            f"[Profile {label}] Join on r/{subreddit} skipped "
+                            f"({brief_error(exc)}) — still browsing"
+                        )
 
                 dwell = community_dwell_seconds(style, session_end - time.time())
                 # Do not let the feed browse alone eat this hop's allowance
@@ -13746,13 +14407,12 @@ def process_profile(
                     f"({community_seconds:.0f}s/{community_budget:.0f}s community time used)"
                 )
                 more_communities = index < len(hops)
+                _after_first_hop_attempt()
                 home_gap = min(
                     _rng().uniform(*style.home_between),
                     max(MIN_HOME_HOP, session_end - time.time() - MIN_HOME_HOP),
                 )
-                skip_home = (not style.hop_home_between) or (
-                    _rng().random() < float(style.home_skip_chance or 0)
-                )
+                skip_home = should_skip_home_gap(style)
                 if more_communities and home_gap >= MIN_HOME_HOP and not skip_home:
                     home_seconds += hop_reddit_home(
                         driver,
@@ -13783,6 +14443,7 @@ def process_profile(
             except Exception as exc:
                 community_seconds += time.time() - sub_started
                 log(f"[Profile {label}] Error on r/{subreddit}: {brief_error(exc)} — back to Home")
+                _after_first_hop_attempt()
                 try:
                     open_reddit_home_ready(driver, label)
                 except Exception:
@@ -13790,9 +14451,27 @@ def process_profile(
                 continue
 
         leftover = session_end - time.time()
+        leftover_dest = style.menu.leftover_dest if style.menu else "home"
         if stop_requested():
             log(f"[Profile {label}] Stopped — closing this account")
-        elif leftover > MIN_LEFTOVER_HOME:
+        elif leftover <= MIN_LEFTOVER_HOME:
+            log(
+                f"[Profile {label}] Finished ~{(style.session_seconds if style else ACCOUNT_SESSION_SECONDS) / 60:.0f} min "
+                f"Home → community hops"
+            )
+        elif leftover_dest == "skip":
+            log(
+                f"[Profile {label}] Skipping leftover {leftover:.0f}s — "
+                "this sitting's menu closes after hops"
+            )
+        elif leftover_dest == "visited_subs" and visited_hops:
+            log(
+                f"[Profile {label}] Leftover {leftover:.0f}s in communities already visited"
+            )
+            continue_general_activity_in_subs(
+                driver, label, user_id, stats, visited_hops, leftover
+            )
+        else:
             home_seconds += hop_reddit_home(
                 driver,
                 label,
@@ -13801,11 +14480,18 @@ def process_profile(
                 leftover,
                 "leftover sitting on Home",
             )
-        else:
-            log(
-                f"[Profile {label}] Finished ~{(style.session_seconds if style else ACCOUNT_SESSION_SECONDS) / 60:.0f} min "
-                f"Home → community hops"
-            )
+        allowed_vote, _vote_why = warmup_ladder.may_upvote(stats.account_age_days)
+        if (
+            allowed_vote
+            and int(stats.upvote_target or 0) > 0
+            and int(stats.upvotes or 0) <= 0
+            and not stop_requested()
+        ):
+            log(f"[Profile {label}] Day-4+ streak — leaving one upvote before closing")
+            try:
+                upvote_random_post(driver, label, stats, read_first=True)
+            except Exception:
+                pass
         tracked = home_seconds + community_seconds
         if tracked > 0:
             log(
@@ -13935,6 +14621,15 @@ def _launch_profile_wave(
         for index, profile in enumerate(targets):
             if stop_requested():
                 break
+            if account_is_dead(profile["user_id"]):
+                label = profile.get("name") or profile["user_id"]
+                log(f"Skipping {label} — banned/suspended before this open")
+                skipped = AccountSummary(name=label, user_id=profile["user_id"])
+                skipped.sitting_ok = False
+                skipped.account_status = "banned"
+                skipped.post_note = "skipped banned"
+                reports.append(skipped)
+                continue
             sch = schedules.get(profile["user_id"]) or {}
             label = profile.get("name") or profile["user_id"]
             delay = 0.0 if retry else float(sch.get("start_delay") or 0)
@@ -13948,6 +14643,14 @@ def _launch_profile_wave(
                 interruptible_sleep(delay)
             if stop_requested():
                 break
+            if account_is_dead(profile["user_id"]):
+                log(f"Skipping {label} — banned/suspended before this open")
+                skipped = AccountSummary(name=label, user_id=profile["user_id"])
+                skipped.sitting_ok = False
+                skipped.account_status = "banned"
+                skipped.post_note = "skipped banned"
+                reports.append(skipped)
+                continue
             reports.append(
                 process_profile(
                     profile,
@@ -13975,6 +14678,14 @@ def _launch_profile_wave(
         if stop_requested():
             slots[index] = _stopped_summary(profile)
             return
+        if account_is_dead(profile["user_id"]):
+            log(f"Skipping {label} — banned/suspended before this open")
+            skipped = AccountSummary(name=label, user_id=profile["user_id"])
+            skipped.sitting_ok = False
+            skipped.account_status = "banned"
+            skipped.post_note = "skipped banned"
+            slots[index] = skipped
+            return
         sch = schedules.get(profile["user_id"]) or {}
         delay = 0.0 if retry else float(sch.get("start_delay") or 0)
         log("-" * 56)
@@ -13985,6 +14696,14 @@ def _launch_profile_wave(
         if stop_requested():
             log(f"[Profile {label}] Stopped before opening")
             slots[index] = _stopped_summary(profile)
+            return
+        if account_is_dead(profile["user_id"]):
+            log(f"Skipping {label} — banned/suspended before this open")
+            skipped = AccountSummary(name=label, user_id=profile["user_id"])
+            skipped.sitting_ok = False
+            skipped.account_status = "banned"
+            skipped.post_note = "skipped banned"
+            slots[index] = skipped
             return
         log(f"Profile {label}: starting now")
         try:
@@ -14025,11 +14744,37 @@ def _launch_profile_wave(
     return [item for item in slots if item is not None]
 
 
+def account_is_dead(user_id: str) -> bool:
+    try:
+        from reddit_joiner.store import account_outside_status_is_dead
+
+        return account_outside_status_is_dead(user_id)
+    except Exception:
+        return False
+
+
+def drop_dead_targets(targets: List[Dict[str, str]], *, why: str = "") -> List[Dict[str, str]]:
+    kept: List[Dict[str, str]] = []
+    for item in targets:
+        uid = str(item.get("user_id") or "")
+        if uid and account_is_dead(uid):
+            name = item.get("name") or uid
+            log(
+                f"Skipping {name} — already banned/suspended"
+                + (f" ({why})" if why else "")
+            )
+            continue
+        kept.append(item)
+    return kept
+
+
 def run_profiles(
     targets: List[Dict[str, str]],
     subreddits: List[str],
 ) -> List[AccountSummary]:
     """Run every AdsPower account. Parallel mode opens them together (multitask)."""
+    global _CYCLE_STARTED_ISO
+    _CYCLE_STARTED_ISO = datetime.now().isoformat(timespec="seconds")
     assign_batch_search_accounts(targets)
     schedules = assign_profile_schedules(targets)
     log("Assigned a random sitting time and start time for each profile:")
@@ -14050,7 +14795,10 @@ def run_profiles(
         if not stop_requested()
         and by_id.get(profile["user_id"]) is not None
         and not getattr(by_id[profile["user_id"]], "sitting_ok", True)
-        and str(getattr(by_id[profile["user_id"]], "post_note", "") or "") != "stopped"
+        and str(getattr(by_id[profile["user_id"]], "post_note", "") or "")
+        not in {"stopped", "skipped banned"}
+        and not getattr(by_id[profile["user_id"]], "is_banned", lambda: False)()
+        and not account_is_dead(profile["user_id"])
     ]
     if retry_profiles and not stop_requested():
         log(
@@ -14076,8 +14824,26 @@ def main() -> int:
     if disk_error:
         log(disk_error)
         return 1
+    log(
+        "Warmup file: "
+        f"comments from day {warmup_ladder.COMMENT_MIN_AGE_DAYS}, "
+        f"upvotes from day {warmup_ladder.UPVOTE_MIN_AGE_DAYS}, "
+        f"posts from day {warmup_ladder.POST_MIN_AGE_DAYS}"
+    )
     ensure_accounts_sheet()
     ensure_subreddits_sheet()
+    try:
+        from reddit_joiner.store import init_db as _init_status_db
+
+        _init_status_db()
+        imported = load_outside_lookup_reports()
+        if imported:
+            log(f"Outside lookup: stored status for {imported} account(s)")
+        disabled = apply_dead_status_to_accounts_sheet()
+        if disabled:
+            log(f"Outside lookup: disabled {disabled} banned/suspended row(s) in accounts.csv")
+    except Exception as exc:
+        log(f"Could not load outside lookup ({brief_error(exc)})")
     PROFILE_IDS = load_profile_ids()
     sheet_subs = load_browse_subreddits()
     SUBREDDITS = sheet_subs
@@ -14133,12 +14899,9 @@ def main() -> int:
                 epsilon=RL_EPSILON_INIT,
                 epsilon_min=RL_EPSILON_MIN,
                 epsilon_decay=RL_EPSILON_DECAY,
-                alpha=RL_LEARNING_RATE,
-                gamma=RL_DISCOUNT_FACTOR,
                 save_interval=RL_SAVE_INTERVAL,
                 replay_size=RL_REPLAY_SIZE,
                 batch_size=RL_BATCH_SIZE,
-                target_sync=RL_TARGET_SYNC,
                 dqn_lr=RL_DQN_LR,
             )
             set_agent(agent)
@@ -14236,18 +14999,19 @@ def main() -> int:
     if KARMA_GROWTH_ENABLED:
         log(
             f"Per account: {SESSION_SECONDS_RANGE[0] // 60}–{SESSION_SECONDS_RANGE[1] // 60} min sitting, "
-            f"{COMMENTS_PER_WINDOW} comments/{ACTION_WINDOW_HOURS:.0f}h, "
-            f"{POSTS_PER_WINDOW} post/{ACTION_WINDOW_HOURS:.0f}h "
-            f"(sheets first, then general; karma > {WARMUP_MIN_KARMA} to post, "
-            f"age >= {GENERAL_COMMENT_MIN_AGE_DAYS}d for general activity)"
+            f"join from day {warmup_ladder.JOIN_MIN_AGE_DAYS}, upvotes from day {warmup_ladder.UPVOTE_MIN_AGE_DAYS}, "
+            f"{COMMENTS_PER_WINDOW} comment/day from day {GENERAL_COMMENT_MIN_AGE_DAYS}, "
+            f"post from day {warmup_ladder.POST_MIN_AGE_DAYS} every "
+            f"{warmup_ladder.POST_GAP_DAYS[0]}–{warmup_ladder.POST_GAP_DAYS[1]} days"
         )
     log(
         f"Each sitting is a new random mix: {SESSION_SECONDS_RANGE[0] // 60}–"
         f"{SESSION_SECONDS_RANGE[1] // 60} min, Home "
         f"{int(HOME_ACTIVITY_SHARE_RANGE[0]*100)}–{int(HOME_ACTIVITY_SHARE_RANGE[1]*100)}%, "
         f"community visits under {MAX_SUBREDDIT_DWELL:.0f}s. "
-        f"Each account: {COMMENTS_PER_WINDOW} comments and {POSTS_PER_WINDOW} post "
-        f"per {ACTION_WINDOW_HOURS:.0f}h. "
+        f"Each account: {COMMENTS_PER_WINDOW} comment per day from day "
+        f"{GENERAL_COMMENT_MIN_AGE_DAYS}, {POSTS_PER_WINDOW} post from day "
+        f"{warmup_ladder.POST_MIN_AGE_DAYS}. "
         "If comments.csv / posts.csv have unused rows, those go first; "
         "if posts.csv is empty, one general post is written in a subreddits.csv "
         "community after its rules and recent posts are read. "
@@ -14279,6 +15043,17 @@ def main() -> int:
     if not targets:
         log("No AdsPower profiles could be resolved")
         return 1
+
+    targets = drop_dead_targets(targets, why="store status")
+    if not targets:
+        log("No live accounts left after skipping banned/suspended rows")
+        return 1
+
+    random.Random(secrets.randbits(64)).shuffle(targets)
+    order = ", ".join(
+        str(item.get("name") or item.get("user_id") or "?") for item in targets
+    )
+    log(f"Opening {len(targets)} accounts in random order, 4 at a time: {order}")
 
     assigned = sync_comment_sheet_assignments(targets)
     if assigned:

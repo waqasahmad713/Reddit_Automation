@@ -76,6 +76,33 @@ def init_db() -> None:
                 total_upvotes INTEGER DEFAULT 0,
                 last_comment TEXT
             );
+            CREATE TABLE IF NOT EXISTS thread_touches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                account TEXT,
+                user_id TEXT,
+                url TEXT,
+                url_key TEXT,
+                kind TEXT,
+                subreddit TEXT
+            );
+            CREATE TABLE IF NOT EXISTS follows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                account TEXT,
+                user_id TEXT,
+                target TEXT
+            );
+            CREATE TABLE IF NOT EXISTS account_joins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                account TEXT,
+                user_id TEXT,
+                subreddit TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_touches_key ON thread_touches(url_key);
+            CREATE INDEX IF NOT EXISTS idx_follows_target ON follows(target);
+            CREATE INDEX IF NOT EXISTS idx_account_joins_sub ON account_joins(subreddit);
             """
         )
         _ensure_column(conn, "ai_comments", "subreddit", "TEXT")
@@ -86,6 +113,140 @@ def init_db() -> None:
         _ensure_column(conn, "ai_comments", "status", "TEXT")
         _ensure_column(conn, "posts", "fingerprint", "TEXT")
         _ensure_column(conn, "posts", "attempt_number", "INTEGER")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_outside_status (
+                user_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                source TEXT,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+DEAD_ACCOUNT_STATUSES = frozenset({"BANNED", "SUSPENDED"})
+_ID_TOKEN = re.compile(r"k1[a-z0-9]+", re.I)
+
+
+def _norm_outside_status(status: str) -> str:
+    text = str(status or "").strip().upper()
+    if text in {"LIVE", "BANNED", "SUSPENDED"}:
+        return text
+    lower = str(status or "").strip().lower()
+    if "suspend" in lower:
+        return "SUSPENDED"
+    if "banned" in lower or "not found" in lower:
+        return "BANNED"
+    if lower == "live":
+        return "LIVE"
+    return ""
+
+
+def get_account_outside_status(user_id: str) -> str:
+    key = str(user_id or "").strip()
+    if not key:
+        return ""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM account_outside_status WHERE user_id = ?",
+            (key,),
+        ).fetchone()
+    if not row:
+        row = None
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM account_outside_status WHERE lower(user_id) = ?",
+                (key.lower(),),
+            ).fetchone()
+    return str(row["status"] or "").upper() if row else ""
+
+
+def account_outside_status_is_dead(user_id: str) -> bool:
+    return get_account_outside_status(user_id) in DEAD_ACCOUNT_STATUSES
+
+
+def record_account_outside_status(
+    user_id: str,
+    status: str,
+    source: str = "outside",
+) -> str:
+    """Save LIVE/BANNED/SUSPENDED. An outside or inside LIVE never replaces BANNED/SUSPENDED."""
+    key = str(user_id or "").strip()
+    wanted = _norm_outside_status(status)
+    if not key or not wanted:
+        return get_account_outside_status(user_id)
+    current = get_account_outside_status(user_id)
+    if current in DEAD_ACCOUNT_STATUSES and wanted == "LIVE":
+        return current
+    init_db()
+    stamp = datetime.now().isoformat(timespec="seconds")
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_outside_status (user_id, status, source, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                status = excluded.status,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+            """,
+            (key, wanted, str(source or "outside"), stamp),
+        )
+    return wanted
+
+
+def _ids_in_lookup_section(text: str, header: str) -> List[str]:
+    index = text.find(header)
+    if index < 0:
+        return []
+    rest = text[index:]
+    nxt = re.search(
+        r"\n(?:LIVE IDs|BANNED|SUSPENDED|LOOKUP FAILED|MISSING USERNAME|CHECKERS)\b",
+        rest[1:],
+    )
+    chunk = rest[: nxt.start() + 1] if nxt else rest[:8000]
+    match = re.search(r"\bIDs:\s*([kK1a-zA-Z0-9, \t]+)", chunk)
+    if match:
+        blob = match.group(1)
+    else:
+        match = re.search(r"(k1[a-z0-9]+(?:,k1[a-z0-9]+)+)", chunk, re.I)
+        blob = match.group(1) if match else ""
+    seen = []
+    keys = set()
+    for token in _ID_TOKEN.findall(blob.replace(" ", "")):
+        item = token.strip()
+        if not item or item.lower() in keys:
+            continue
+        keys.add(item.lower())
+        seen.append(item)
+        if len(seen) > 400:
+            break
+    return seen
+
+
+def parse_brand_lookup_report(text: str) -> Dict[str, str]:
+    """Map AdsPower user_id -> LIVE / BANNED / SUSPENDED from a checker report."""
+    mapping: Dict[str, str] = {}
+    for header, status in (
+        ("LIVE IDs", "LIVE"),
+        ("\nBANNED", "BANNED"),
+        ("\nSUSPENDED", "SUSPENDED"),
+    ):
+        for user_id in _ids_in_lookup_section(text, header):
+            mapping[user_id] = status
+    return mapping
+
+
+def import_brand_lookup_file(path: str) -> int:
+    if not path or not os.path.isfile(path):
+        return 0
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        mapping = parse_brand_lookup_report(handle.read())
+    for user_id, status in mapping.items():
+        record_account_outside_status(user_id, status, source="outside")
+    return len(mapping)
 
 
 def log_ai_comment(
@@ -433,7 +594,236 @@ def already_commented_url_any(url: str) -> bool:
     init_db()
     with _connect() as conn:
         rows = conn.execute("SELECT post_url FROM ai_comments").fetchall()
+    if any(_link_key(str(row["post_url"] or "")) == key for row in rows):
+        return True
+    return thread_touched_by_any(url)
+
+
+def record_thread_touch(
+    url: str,
+    *,
+    account: str = "",
+    user_id: str = "",
+    kind: str = "open",
+    subreddit: str = "",
+) -> None:
+    key = _link_key(url)
+    if not key:
+        return
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO thread_touches
+            (created_at, account, user_id, url, url_key, kind, subreddit)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                account,
+                user_id,
+                url,
+                key,
+                str(kind or "open"),
+                (subreddit or "").strip().lstrip("r/"),
+            ),
+        )
+
+
+def thread_touched_by_any(url: str) -> bool:
+    key = _link_key(url)
+    if not key:
+        return False
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM thread_touches WHERE url_key = ? LIMIT 1",
+            (key,),
+        ).fetchone()
+        if row:
+            return True
+        rows = conn.execute("SELECT post_url FROM ai_comments").fetchall()
     return any(_link_key(str(row["post_url"] or "")) == key for row in rows)
+
+
+def votes_today_for_account(user_id: str) -> int:
+    if not user_id:
+        return 0
+    init_db()
+    start = datetime.now().strftime("%Y-%m-%d")
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM thread_touches
+            WHERE (user_id = ? OR account = ?) AND kind = 'vote' AND created_at >= ?
+            """,
+            (user_id, user_id, start),
+        ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def surviving_comment_subs(user_id: str) -> List[str]:
+    if not user_id:
+        return []
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT subreddit, status FROM ai_comments
+            WHERE user_id = ? OR account = ?
+            """,
+            (user_id, user_id),
+        ).fetchall()
+    found = []
+    seen = set()
+    dead = {"removed", "deleted", "collapsed"}
+    for row in rows:
+        name = str(row["subreddit"] or "").strip().lstrip("r/").lower()
+        status = str(row["status"] or "").strip().lower()
+        if not name or name in seen or status in dead:
+            continue
+        seen.add(name)
+        found.append(name)
+    return found
+
+
+def has_surviving_comment(user_id: str, subreddit: str) -> bool:
+    name = (subreddit or "").strip().lstrip("r/").lower()
+    return bool(name) and name in surviving_comment_subs(user_id)
+
+
+def record_follow(user_id: str, target: str, account: str = "") -> None:
+    name = (target or "").strip().lstrip("u/").lower()
+    if not name or not user_id:
+        return
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO follows (created_at, account, user_id, target)
+            VALUES (?, ?, ?, ?)
+            """,
+            (datetime.now().isoformat(timespec="seconds"), account or user_id, user_id, name),
+        )
+
+
+def follows_for_account(user_id: str) -> List[str]:
+    if not user_id:
+        return []
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT target FROM follows WHERE user_id = ? OR account = ? ORDER BY id",
+            (user_id, user_id),
+        ).fetchall()
+    found = []
+    seen = set()
+    for row in rows:
+        name = str(row["target"] or "").strip().lower()
+        if name and name not in seen:
+            seen.add(name)
+            found.append(name)
+    return found
+
+
+def follows_today_for_account(user_id: str) -> int:
+    if not user_id:
+        return 0
+    init_db()
+    start = datetime.now().strftime("%Y-%m-%d")
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM follows
+            WHERE (user_id = ? OR account = ?) AND created_at >= ?
+            """,
+            (user_id, user_id, start),
+        ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def follow_count_for_user(target: str) -> int:
+    name = (target or "").strip().lstrip("u/").lower()
+    if not name:
+        return 0
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM follows WHERE target = ?",
+            (name,),
+        ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def record_account_join(user_id: str, subreddit: str, account: str = "") -> None:
+    name = (subreddit or "").strip().lstrip("r/").lower()
+    if not name or not user_id:
+        return
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_joins (created_at, account, user_id, subreddit)
+            VALUES (?, ?, ?, ?)
+            """,
+            (datetime.now().isoformat(timespec="seconds"), account or user_id, user_id, name),
+        )
+
+
+def joined_subs_for_account(user_id: str) -> List[str]:
+    if not user_id:
+        return []
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT subreddit FROM account_joins WHERE user_id = ? OR account = ? ORDER BY id",
+            (user_id, user_id),
+        ).fetchall()
+    found = []
+    seen = set()
+    for row in rows:
+        name = str(row["subreddit"] or "").strip().lower()
+        if name and name not in seen:
+            seen.add(name)
+            found.append(name)
+    return found
+
+
+def first_three_join_set() -> set:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT user_id, subreddit FROM account_joins ORDER BY id"
+        ).fetchall()
+    by_user: Dict[str, List[str]] = {}
+    for row in rows:
+        uid = str(row["user_id"] or "")
+        name = str(row["subreddit"] or "").strip().lower()
+        if not uid or not name:
+            continue
+        bucket = by_user.setdefault(uid, [])
+        if name not in bucket and len(bucket) < 3:
+            bucket.append(name)
+    used = set()
+    for names in by_user.values():
+        used.update(names)
+    return used
+
+
+def joins_this_cycle_for_sub(subreddit: str, since_iso: str) -> int:
+    name = (subreddit or "").strip().lstrip("r/").lower()
+    if not name:
+        return 0
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT user_id) AS n FROM account_joins
+            WHERE subreddit = ? AND created_at >= ?
+            """,
+            (name, since_iso),
+        ).fetchone()
+    return int(row["n"] if row else 0)
 
 
 def comments_in_last_days(user_id: str, days: float) -> List[Dict[str, Any]]:

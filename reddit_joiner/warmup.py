@@ -12,11 +12,12 @@ POST_MIN_AGE_DAYS = 14
 NEWS_MIN_AGE_DAYS = 2
 FOLLOW_MIN_AGE_DAYS = 5
 ASK_JOIN_MIN_AGE_DAYS = 3
+JOIN_MIN_AGE_DAYS = 4
 COMMENTS_PER_DAY = 1
 POST_GAP_DAYS = (5, 9)
 SITTING_NEW_SCALE = (0.5, 0.7)
-UPVOTE_DAYS_4_7 = (1, 3)
-UPVOTE_DAYS_8_POST = (2, 6)
+UPVOTE_DAYS_4_7 = (0, 3)
+UPVOTE_DAYS_8_POST = (0, 5)
 UPVOTE_COMMENT_DAYS_8 = (0, 2)
 FOLLOW_CHANCE_RANGE = (0.04, 0.10)
 FOLLOW_MAX_PER_DAY = 1
@@ -73,7 +74,7 @@ def day_band(age: float) -> str:
 def day_band_label(age: float) -> str:
     return {
         "unknown": "age unread",
-        "days_1_3": "days 1-3 browse+join",
+        "days_1_3": "days 1-3 browse only",
         "days_4_7": "days 4-7 upvotes",
         "days_8_13": "day 8+ comments",
         "day_14_plus": "day 14+ posts",
@@ -84,6 +85,11 @@ def may_join(age: float, subreddit: str = "") -> Tuple[bool, str]:
     value = float(age or 0)
     if value < 1.0:
         return False, "account age was not read — not joining"
+    if value < float(JOIN_MIN_AGE_DAYS):
+        return (
+            False,
+            f"no joins until day {JOIN_MIN_AGE_DAYS} (account is {value:.0f}d)",
+        )
     name = (subreddit or "").strip().lstrip("r/").lower()
     if name in ASK_JOIN_NAMES or name.startswith("ask"):
         if value < float(ASK_JOIN_MIN_AGE_DAYS):

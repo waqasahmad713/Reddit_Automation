@@ -41,8 +41,13 @@ def _joiner():
     return joiner
 
 
-def adspower_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if _joiner().stop_requested():
+def adspower_get(
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    while_stopping: bool = False,
+) -> Dict[str, Any]:
+    if not while_stopping and _joiner().stop_requested():
         raise RuntimeError("stopped")
     _throttle_api()
     url = f"{ADSPOWER_API}{path}"
@@ -230,11 +235,46 @@ def start_profile(
     return data
 
 
-def stop_profile(user_id: str, label: str) -> None:
-    """Close the profile with /api/v1/browser/stop."""
-    j = _joiner()
+STOP_TRIES = 3
+
+
+def profile_still_open(user_id: str) -> Optional[bool]:
+    """True/False from /browser/active; None when AdsPower does not answer."""
     try:
-        adspower_get("/api/v1/browser/stop", params={"user_id": user_id})
-        j.log(f"[Profile {label}] AdsPower Stop API called")
-    except Exception as exc:
-        j.log(f"[Profile {label}] Stop API warning: {j.brief_error(exc)}")
+        payload = adspower_get(
+            "/api/v1/browser/active", params={"user_id": user_id}, while_stopping=True
+        )
+    except Exception:
+        return None
+    info = payload.get("data") or {}
+    status = str(info.get("status") or "").strip().lower()
+    if status:
+        return status == "active"
+    return bool(((info.get("ws") or {}).get("selenium") or "").strip())
+
+
+def stop_profile(user_id: str, label: str) -> None:
+    """Close the profile with /api/v1/browser/stop and check it really closed."""
+    j = _joiner()
+    for attempt in range(1, STOP_TRIES + 1):
+        try:
+            adspower_get(
+                "/api/v1/browser/stop", params={"user_id": user_id}, while_stopping=True
+            )
+        except Exception as exc:
+            j.log(f"[Profile {label}] Stop API warning: {j.brief_error(exc)}")
+        time.sleep(1.5 * attempt)
+        still = profile_still_open(user_id)
+        if still is None:
+            j.log(f"[Profile {label}] Browser close not verifiable — AdsPower did not answer")
+            return
+        if not still:
+            if attempt == 1:
+                j.log(f"[Profile {label}] AdsPower stop verified — browser closed")
+            else:
+                j.log(f"[Profile {label}] Browser closed on stop retry {attempt}")
+            return
+    j.log(
+        f"[Profile {label}] Browser still open after {STOP_TRIES} stop tries — "
+        "close it in AdsPower"
+    )

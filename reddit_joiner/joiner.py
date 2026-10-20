@@ -47,6 +47,7 @@ from reddit_joiner.paths import (
     COMMENTS_SHEET as _COMMENTS_SHEET,
     DATA_DIR as _DATA_DIR,
     ENV_FILE,
+    LOGS_DIR as _LOGS_DIR,
     POST_LOG_PATH as _POST_LOG_PATH,
     POSTS_SHEET as _POSTS_SHEET,
     POST_TEMPLATES_DIR as _POST_TEMPLATES_DIR,
@@ -2057,6 +2058,9 @@ class AccountSummary:
     media_watched: int = 0
     inbox_glances: int = 0
     feed_sorts: List[str] = field(default_factory=list)
+    proxy_ip: str = ""
+    gallery_steps: int = 0
+    sitting_seconds: float = 0.0
 
     def display_name(self) -> str:
         if self.reddit_username:
@@ -2279,6 +2283,69 @@ def session_tally_lines(reports: List[AccountSummary]) -> List[str]:
     ]
 
 
+def _analytics_status(item: AccountSummary) -> str:
+    if not item.sitting_ok:
+        return "no browser"
+    if item.is_banned():
+        return "suspended" if "suspend" in (item.account_status or "").lower() else "banned"
+    if (item.account_status or "").strip():
+        return item.account_status.strip()[:12]
+    if item.account_age_days and item.account_age_days < warmup_ladder.COMMENT_MIN_AGE_DAYS:
+        return f"warmup d{item.account_age_days:.0f}"
+    return "live"
+
+
+def sitting_rows(reports: List[AccountSummary]) -> List[Dict[str, Any]]:
+    """One dict per sitting for the sittings table and the charts."""
+    rows: List[Dict[str, Any]] = []
+    for item in reports:
+        rows.append(
+            {
+                "user_id": item.user_id,
+                "account": item.display_name(),
+                "age_days": float(item.account_age_days or 0),
+                "status": _analytics_status(item),
+                "minutes": round(float(item.sitting_seconds or 0) / 60.0, 2),
+                "upvotes": int(item.upvotes or 0),
+                "upvote_target": int(item.upvote_target or 0),
+                "comments": int(item.comments_placed()),
+                "comment_target": int(item.session_comment_target or 0),
+                "joins": len(item.joined),
+                "posts": int(item.posts_placed()),
+                "karma": int(item.account_karma or 0),
+                "ip": item.proxy_ip or "",
+                "gallery_steps": int(item.gallery_steps or 0),
+                "sitting_ok": 1 if item.sitting_ok else 0,
+            }
+        )
+    return rows
+
+
+def session_analytics_lines(reports: List[AccountSummary]) -> List[str]:
+    """Per-account table for the end of the run (terminal only)."""
+    if not reports:
+        return []
+    header = (
+        f"{'Account':<22} {'Age':>4}  {'Status':<12} {'Min':>5}  {'Up(t)':<6} "
+        f"{'Cm(t)':<6} {'Join':>4} {'Post':>4} {'Karma':>6}  IP"
+    )
+    lines = ["PER-ACCOUNT ANALYTICS", header, "-" * len(header)]
+    for item in reports:
+        name = item.display_name()
+        if len(name) > 22:
+            name = name[:21] + "…"
+        age = f"{item.account_age_days:.0f}d" if item.account_age_days else "?"
+        minutes = f"{item.sitting_seconds / 60.0:.1f}" if item.sitting_seconds else "-"
+        ups = f"{int(item.upvotes or 0)}({int(item.upvote_target or 0)})"
+        cms = f"{item.comments_placed()}({int(item.session_comment_target or 0)})"
+        lines.append(
+            f"{name:<22} {age:>4}  {_analytics_status(item):<12} {minutes:>5}  {ups:<6} "
+            f"{cms:<6} {len(item.joined):>4} {item.posts_placed():>4} "
+            f"{int(item.account_karma or 0):>6}  {item.proxy_ip or '-'}"
+        )
+    return lines
+
+
 def session_account_lines(reports: List[AccountSummary]) -> List[str]:
     """One line per account."""
     if not reports:
@@ -2318,11 +2385,58 @@ _SHEET_LOCK = threading.RLock()
 _FILE_LOCK = threading.RLock()
 
 
+_REDACT_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"(\w+://)[^\s:@/]+:[^\s@/]+@"), r"\1[redacted]@"),
+    (re.compile(r"(?<![\w/])[^\s:@/]+:[^\s@/]+@(?=[\w.-]+(?::\d+)?)"), "[redacted]@"),
+    (re.compile(r"\b([\w.-]+\.[a-z]{2,}:\d{2,5}):[^\s:]+:[^\s:]+"), r"\1:[redacted]"),
+    (re.compile(r"\bcustomer-[\w-]+", re.I), "customer-[redacted]"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"), "[redacted]"),
+    (re.compile(r"(?i)\b(bearer)\s+[\w.~+/=-]{8,}"), r"\1 [redacted]"),
+    (
+        re.compile(
+            r"(?i)\b(password|passwd|pwd|pass|token|api[_-]?key|secret|authorization)"
+            r"(\s*[:=]\s*)\S+"
+        ),
+        r"\1\2[redacted]",
+    ),
+]
+
+_RUN_LOG_PATH: Optional[Path] = None
+
+
+def redact_secrets(text: str) -> str:
+    """Strip proxy logins, passwords, tokens and API keys before a line hits disk."""
+    out = str(text or "")
+    for pattern, repl in _REDACT_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def start_run_log() -> str:
+    """Open logs/run-<stamp>.log; every log() line is also appended there."""
+    global _RUN_LOG_PATH
+    try:
+        _LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        _RUN_LOG_PATH = _LOGS_DIR / f"run-{stamp}.log"
+        _RUN_LOG_PATH.touch()
+    except Exception:
+        _RUN_LOG_PATH = None
+        return ""
+    return str(_RUN_LOG_PATH)
+
+
 def log(message: str) -> None:
     stamp = datetime.now().strftime("%H:%M:%S")
     line = f"[{stamp}] {message}"
     with _LOG_LOCK:
         print(line, flush=True)
+        if _RUN_LOG_PATH is not None:
+            try:
+                with open(_RUN_LOG_PATH, "a", encoding="utf-8") as handle:
+                    handle.write(redact_secrets(line) + "\n")
+            except Exception:
+                pass
 
 
 _STOP_RUN = threading.Event()
@@ -3109,9 +3223,48 @@ def live_comment_example(name: str) -> str:
         return ""
 
 
+JOIN_FAIL_BLOCK_ACCOUNTS = 3  # different accounts that could not Join before a sub is dropped
+_JOIN_BLOCKED_CACHE: Dict[str, Any] = {"at": 0.0, "subs": set()}
+_JOIN_BLOCKED_LOCK = threading.Lock()
+
+
+def join_blocked_subreddits() -> set:
+    with _JOIN_BLOCKED_LOCK:
+        if time.time() - float(_JOIN_BLOCKED_CACHE["at"]) < 60.0:
+            return set(_JOIN_BLOCKED_CACHE["subs"])
+    try:
+        from reddit_joiner.store import join_blocked_subs
+
+        subs = join_blocked_subs(JOIN_FAIL_BLOCK_ACCOUNTS)
+    except Exception:
+        subs = set()
+    with _JOIN_BLOCKED_LOCK:
+        _JOIN_BLOCKED_CACHE["at"] = time.time()
+        _JOIN_BLOCKED_CACHE["subs"] = set(subs)
+    return set(subs)
+
+
+def note_join_failure(label: str, subreddit: str, reason: str) -> None:
+    user_id = str(getattr(_tls, "batch_user_id", "") or "")
+    try:
+        from reddit_joiner.store import record_join_failure
+
+        accounts = record_join_failure(user_id, normalize_subreddit(subreddit), reason)
+    except Exception:
+        return
+    if accounts == JOIN_FAIL_BLOCK_ACCOUNTS:
+        log(
+            f"[Profile {label}] r/{subreddit}: Join failed on {accounts} accounts — "
+            "blocking this community for every account"
+        )
+        with _JOIN_BLOCKED_LOCK:
+            _JOIN_BLOCKED_CACHE["at"] = 0.0
+
+
 def is_blocked_subreddit(name: str) -> bool:
     """True for communities we never touch, even if a sheet still lists them."""
-    return normalize_subreddit(name).lower() in BLOCKED_SUBREDDITS
+    key = normalize_subreddit(name).lower()
+    return key in BLOCKED_SUBREDDITS or key in join_blocked_subreddits()
 
 
 def allowed_subreddits() -> List[str]:
@@ -4682,6 +4835,23 @@ def _public_ips_in_text(text: str) -> List[str]:
     return found
 
 
+def note_account_ip(label: str, user_id: str, ip: str) -> None:
+    """Keep the day's proxy IP; warn when another account was on the same IP today."""
+    if not ip:
+        return
+    try:
+        from reddit_joiner.store import record_account_ip
+
+        others = record_account_ip(user_id, ip, account=label)
+    except Exception:
+        return
+    if others:
+        log(
+            f"[Profile {label}] IP {ip} also used by {', '.join(others[:4])} today — "
+            "check proxy"
+        )
+
+
 def wait_for_proxy_ip(driver: WebDriver, label: str, user_id: str) -> str:
     """Stay on the AdsPower IP tab until a public IP is assigned and refresh is done."""
     prefix = f"[Profile {label}] "
@@ -4880,6 +5050,25 @@ def connect_to_browser(data: Dict[str, Any], label: str) -> WebDriver:
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
     driver.implicitly_wait(0)
     return driver
+
+
+def wind_down(driver: WebDriver, label: str, seconds: float) -> None:
+    """Calm close: a short read, sometimes a little scroll up or Home, then stop."""
+    end = time.time() + max(0.0, float(seconds))
+    try:
+        if not current_is_reddit(driver):
+            return
+        log(f"[Profile {label}] Winding down ~{seconds:.0f}s before closing")
+        human_sleep(_rng().uniform(2.0, 6.0), remaining=end - time.time())
+        if _rng().random() < 0.45 and end - time.time() > 2.0:
+            human_scroll(driver, -1, remaining=min(4.0, end - time.time()))
+        if _rng().random() < 0.30 and end - time.time() > 6.0 and not _on_reddit_home(driver):
+            return_to_reddit_home(driver, label, reason="wind-down")
+        left = end - time.time()
+        if left > 0:
+            human_sleep(left, remaining=left)
+    except Exception as exc:
+        log(f"[Profile {label}] Wind-down cut short ({brief_error(exc)})")
 
 
 def close_browser(driver: Optional[WebDriver], user_id: str, label: str) -> None:
@@ -5638,6 +5827,57 @@ def _account_payload_suspended(data: Dict[str, Any]) -> bool:
     return False
 
 
+def _reason_is_ban(reason: str) -> bool:
+    text = (reason or "").lower()
+    return "banned" in text or "suspend" in text
+
+
+def confirm_ban_sign(driver: WebDriver, label: str, first_reason: str) -> str:
+    """
+    Strike 2: reload Home and look again. Returns the confirmed reason, or ''
+    when the second look is clean (a false alarm).
+    """
+    log(f"[Profile {label}] Ban sign ({first_reason}) — reloading Home to check again")
+    time.sleep(_rng().uniform(3.0, 6.0))
+    try:
+        open_reddit_home_ready(driver, label)
+    except RuntimeError:
+        again = home_account_block_reason(driver, False)
+        return again or first_reason
+    time.sleep(_rng().uniform(1.5, 3.0))
+    info: Dict[str, Any] = {}
+    try:
+        info = read_logged_in_account(driver, label)
+    except Exception:
+        info = {}
+    if info.get("suspended"):
+        return "the account is suspended"
+    again = home_account_block_reason(driver, bool(info.get("username")))
+    if again == "account banned":
+        return "the account is banned"
+    return again
+
+
+def handle_ban_sign(
+    driver: WebDriver,
+    label: str,
+    user_id: str,
+    stats: AccountSummary,
+    first_reason: str,
+) -> bool:
+    """True when the sign is confirmed and this account must close."""
+    confirmed = confirm_ban_sign(driver, label, first_reason)
+    if not confirmed:
+        log(f"[Profile {label}] Ban sign was a false alarm — continuing")
+        return False
+    stats.account_status = confirmed
+    if _reason_is_ban(confirmed):
+        persist_inside_ban(user_id, confirmed)
+    log(f"[Profile {label}] Confirmed twice — closing this account ({confirmed})")
+    stats.print_report()
+    return True
+
+
 def read_logged_in_account(driver: WebDriver, label: str) -> Dict[str, Any]:
     payload = reddit_session_json(driver, "https://www.reddit.com/api/v1/me.json", label)
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
@@ -5939,9 +6179,11 @@ def join_subreddit(driver: WebDriver, label: str, subreddit: str) -> str:
             button = _find_join_button(driver)
         if button is None:
             log(f"[Profile {label}] Join button not found on r/{subreddit}")
+            note_join_failure(label, subreddit, "button not found")
             return "failed"
         if not human_click(driver, button):
             log(f"[Profile {label}] Join click did not fire on r/{subreddit}")
+            note_join_failure(label, subreddit, "click did not fire")
             return "failed"
 
     time.sleep(_rng().uniform(0.8, 1.6))
@@ -6993,9 +7235,14 @@ def _hover(driver: WebDriver, element: Any) -> None:
 _last_upvote_at: Dict[str, float] = {}
 
 
+DEADLINE_PAUSE_GRACE = 15.0  # total seconds a sitting's pauses may run past its deadline
+WIND_DOWN_SECONDS = (5.0, 25.0)
+
+
 def set_session_deadline(when: Optional[float]) -> None:
-    """Hard stop for this account's sitting. Pauses never sleep past it."""
+    """Hard stop for this account's sitting. New actions stop at it."""
     _tls.deadline = when
+    _tls.deadline_grace_used = 0.0
 
 
 def deadline_remaining() -> Optional[float]:
@@ -7014,8 +7261,9 @@ def past_deadline() -> bool:
 
 def human_sleep(seconds: float, remaining: Optional[float] = None) -> float:
     """
-    Sleep, clamped by both the caller's own budget and the sitting deadline, so
-    one long pause can never push a 6–15 min sitting over its time.
+    Sleep, clamped by the caller's own budget. A pause that crosses the sitting
+    deadline finishes normally out of a small per-sitting grace, so the last
+    actions never fire back-to-back; once the grace is spent pauses clamp.
     """
     nap = max(0.0, float(seconds))
     try:
@@ -7025,8 +7273,13 @@ def human_sleep(seconds: float, remaining: Optional[float] = None) -> float:
     if remaining is not None:
         nap = min(nap, max(0.0, float(remaining)))
     left = deadline_remaining()
-    if left is not None:
-        nap = min(nap, max(0.0, left))
+    if left is not None and nap > max(0.0, left):
+        room = max(0.0, left)
+        used = float(getattr(_tls, "deadline_grace_used", 0.0) or 0.0)
+        grace = 0.0 if stop_requested() else max(0.0, DEADLINE_PAUSE_GRACE - used)
+        extra = min(nap - room, grace)
+        _tls.deadline_grace_used = used + extra
+        nap = room + extra
     if nap > 0:
         interruptible_sleep(nap)
     return nap
@@ -9307,6 +9560,32 @@ return { title: title, body: body, url: location.href };
 """
 
 
+_THREAD_REPLIES_JS = r"""
+const limit = arguments[0] || 3;
+const out = [];
+const nodes = Array.from(document.querySelectorAll('shreddit-comment'));
+const top = nodes.filter(n => (n.getAttribute('depth') || '0') === '0');
+for (const el of (top.length ? top : nodes)) {
+  if (out.length >= limit) break;
+  let box = el.querySelector(':scope > [slot="comment"]') || el.querySelector('[slot="comment"]');
+  let t = ((box || el).innerText || '').replace(/\s+/g, ' ').trim();
+  if (!t || t.length < 8) continue;
+  if (/^\[(deleted|removed)\]$/i.test(t)) continue;
+  out.push(t.slice(0, 200));
+}
+return out;
+"""
+
+
+def read_thread_replies(driver: WebDriver, limit: int = 3) -> List[str]:
+    """Up to `limit` top-level replies already on the open thread."""
+    try:
+        rows = driver.execute_script(_THREAD_REPLIES_JS, int(limit)) or []
+    except Exception:
+        return []
+    return [str(item) for item in rows if str(item or "").strip()][: int(limit)]
+
+
 def extract_opened_post(driver: WebDriver) -> Dict[str, str]:
     try:
         data = driver.execute_script(_EXTRACT_POST_JS) or {}
@@ -9642,6 +9921,9 @@ def maybe_ai_comment_on_opened_post(
     action = f"comment:{tone}"
     state = _rl_state(stats, subreddit, title, body, sentiment=score, kind=kind, rules=rules)
     example = live_comment_example(subreddit)
+    replies = read_thread_replies(driver, limit=3)
+    if replies:
+        log(f"{prefix}Read {len(replies)} existing repl{'y' if len(replies) == 1 else 'ies'} — will not repeat them")
     text = ""
     provider = ""
     excluded: List[str] = []
@@ -9716,9 +9998,14 @@ def maybe_ai_comment_on_opened_post(
                 analysis=analysis,
                 rules=getattr(rules, "prompt_text", lambda: "")(),
                 example=example,
+                replies=replies,
             )
         except Exception as exc:
-            log(f"{prefix}Comment draft failed ({brief_error(exc)})")
+            reason = brief_error(exc)
+            if reason.startswith("draft rejected"):
+                log(f"{prefix}Comment {reason}")
+            else:
+                log(f"{prefix}Comment draft failed ({reason})")
             _rl_learn(
                 stats, state, action, REWARD_COMMENT_FAILED, graded=False
             )
@@ -9888,6 +10175,95 @@ def leave_opened_page(
         return "fail"
 
 
+_GALLERY_ARROW_JS = r"""
+const want = arguments[0];
+function walk(root, fn) {
+  fn(root);
+  let nodes;
+  try { nodes = root.querySelectorAll('*'); } catch (e) { return; }
+  nodes.forEach(el => { if (el.shadowRoot) walk(el.shadowRoot, fn); });
+}
+const carousels = [];
+walk(document, root => {
+  try {
+    root.querySelectorAll('gallery-carousel, shreddit-gallery-carousel, [data-testid*="gallery"]')
+      .forEach(el => carousels.push(el));
+  } catch (e) {}
+});
+for (const box of carousels) {
+  const r = box.getBoundingClientRect();
+  if (r.width < 80 || r.height < 80) continue;
+  let hit = null;
+  walk(box, root => {
+    if (hit) return;
+    let buttons = [];
+    try { buttons = root.querySelectorAll('button'); } catch (e) { return; }
+    for (const b of buttons) {
+      const label = (b.getAttribute('aria-label') || '').toLowerCase();
+      if (!label.includes(want)) continue;
+      const br = b.getBoundingClientRect();
+      if (br.width > 0 && br.height > 0 && !b.disabled) { hit = b; return; }
+    }
+  });
+  if (hit) return hit;
+}
+return null;
+"""
+
+
+def _gallery_arrow(driver: WebDriver, direction: str) -> Optional[Any]:
+    try:
+        return driver.execute_script(_GALLERY_ARROW_JS, direction)
+    except Exception:
+        return None
+
+
+def browse_gallery(
+    driver: WebDriver,
+    label: str,
+    stats: Optional[AccountSummary],
+    budget: float = 25.0,
+) -> int:
+    """Step through an opened gallery with the > arrow. Watching only, never a comment."""
+    if _gallery_arrow(driver, "next") is None:
+        return 0
+    prefix = f"[Profile {label}] " if label else ""
+    end = time.time() + max(0.0, float(budget))
+    want = _rng().randint(2, 5)
+    steps = 0
+    human_sleep(_rng().uniform(1.5, 4.0), remaining=end - time.time())
+    while steps < want and time.time() < end and not past_deadline():
+        arrow = _gallery_arrow(driver, "next")
+        if arrow is None:
+            break
+        clicked = False
+        try:
+            clicked = bool(human_click(driver, arrow))
+        except Exception:
+            clicked = False
+        if not clicked:
+            try:
+                driver.execute_script("arguments[0].click();", arrow)
+                clicked = True
+            except Exception:
+                break
+        steps += 1
+        human_sleep(_rng().uniform(1.5, 5.0), remaining=end - time.time())
+        if steps >= 2 and _rng().random() < 0.18:
+            back = _gallery_arrow(driver, "prev")
+            if back is not None:
+                try:
+                    driver.execute_script("arguments[0].click();", back)
+                    human_sleep(_rng().uniform(1.5, 3.5), remaining=end - time.time())
+                except Exception:
+                    pass
+    if steps:
+        log(f"{prefix}Looked through {steps + 1} gallery images")
+        if stats is not None:
+            stats.gallery_steps += steps
+    return steps
+
+
 def perform_browse_activity(
     driver: WebDriver,
     duration: float,
@@ -10022,7 +10398,10 @@ def perform_browse_activity(
             time.sleep(min(_rng().uniform(*post_load), remaining - 12.0))
             dismiss_popups(driver)
             if watch_media:
-                human_sleep(min(_rng().uniform(8.0, 25.0), max(4.0, end_at - time.time() - 6.0)))
+                watch_for = max(4.0, end_at - time.time() - 6.0)
+                stepped = browse_gallery(driver, label, stats, budget=min(30.0, watch_for))
+                if not stepped:
+                    human_sleep(min(_rng().uniform(8.0, 25.0), watch_for))
                 if stats is not None:
                     stats.media_watched += 1
                 leave_opened_page(driver, label, recover_url=recover_url)
@@ -13517,6 +13896,7 @@ def process_profile(
     style: Optional[SessionStyle] = None
     hops: List[str] = []
     started = False
+    wind_down_for = 0.0
 
     if stop_requested():
         stats.sitting_ok = False
@@ -13572,7 +13952,8 @@ def process_profile(
             stats.post_note = "hung start"
             return stats
         raise_profile_browser(label)
-        wait_for_proxy_ip(driver, label, user_id)
+        stats.proxy_ip = wait_for_proxy_ip(driver, label, user_id) or ""
+        note_account_ip(label, user_id, stats.proxy_ip)
 
         log(f"[Profile {label}] Step 1 done — proxy IP ready. Opening Reddit Home.")
         try:
@@ -13581,11 +13962,8 @@ def process_profile(
             blocked = home_account_block_reason(driver, False)
             if not blocked:
                 raise
-            stats.account_status = blocked
-            persist_inside_ban(user_id, blocked)
-            log(f"[Profile {label}] Closing this account — {blocked}")
-            stats.print_report()
-            return stats
+            if handle_ban_sign(driver, label, user_id, stats, blocked):
+                return stats
         logged_in = False
         try:
             info = read_logged_in_account(driver, label)
@@ -13595,18 +13973,13 @@ def process_profile(
             log(f"[Profile {label}] Account analysis failed ({brief_error(exc)})")
             info = {}
         if info.get("suspended"):
-            stats.account_status = "the account is banned"
-            persist_inside_ban(user_id, "the account is suspended")
             who = f"u/{stats.reddit_username} " if stats.reddit_username else ""
-            log(f"[Profile {label}] Account check: {who}account banned — closing")
-            stats.print_report()
-            return stats
+            log(f"[Profile {label}] Account check: {who}looks suspended")
+            if handle_ban_sign(driver, label, user_id, stats, "the account is suspended"):
+                return stats
+            info = dict(info, suspended=False)
         blocked = account_ban_reason(driver, label, stats, info, logged_in)
-        if blocked:
-            stats.account_status = blocked
-            persist_inside_ban(user_id, blocked)
-            log(f"[Profile {label}] Closing this account — {blocked}")
-            stats.print_report()
+        if blocked and handle_ban_sign(driver, label, user_id, stats, blocked):
             return stats
         if time.time() > open_deadline:
             log(f"[Profile {label}] Hung start — Reddit did not finish login in 3 min")
@@ -13672,8 +14045,9 @@ def process_profile(
         set_current_style(style)
         session_start = time.time()
         stats.session_started_at = session_start
-        session_end = session_start + float(style.session_seconds)
-        # Hard stop: every pause from here on is clamped to this sitting
+        wind_down_for = _rng().uniform(*WIND_DOWN_SECONDS)
+        session_end = session_start + float(style.session_seconds) - wind_down_for
+        # Hard stop for new actions; the wind-down fills the reserved tail
         set_session_deadline(session_end)
         _tls.cursor = None
         _tls.viewport = None
@@ -14571,8 +14945,17 @@ def process_profile(
             stats.post_note = brief_error(exc)
     finally:
         release_all_held_subreddits(user_id)
-        set_current_style(None)
         set_session_deadline(None)
+        if (
+            driver is not None
+            and wind_down_for > 0
+            and not stop_requested()
+            and not stats.is_banned()
+        ):
+            wind_down(driver, label, wind_down_for)
+        if stats.session_started_at:
+            stats.sitting_seconds = max(0.0, time.time() - stats.session_started_at)
+        set_current_style(None)
         end_session_rng()
         close_browser(driver, user_id, label)
         agent = _rl_agent()
@@ -14820,6 +15203,9 @@ def run_profiles(
 def main() -> int:
     global PROFILE_IDS, SUBREDDITS, SUBREDDITS_TO_BROWSE
     install_stop_handlers()
+    run_log = start_run_log()
+    if run_log:
+        log(f"Run log: {run_log} (proxy logins and passwords redacted)")
     disk_error = require_disk_space()
     if disk_error:
         log(disk_error)
@@ -15084,6 +15470,24 @@ def main() -> int:
     log("")
     for line in session_account_lines(reports):
         log(line)
+    log("")
+    for line in session_analytics_lines(reports):
+        log(line)
+    run_id = _CYCLE_STARTED_ISO or datetime.now().isoformat(timespec="seconds")
+    try:
+        from reddit_joiner.store import record_sittings
+
+        record_sittings(run_id, sitting_rows(reports))
+    except Exception as exc:
+        log(f"Could not save sittings for analytics ({brief_error(exc)})")
+    try:
+        from reddit_joiner.analytics import build_report
+
+        log(f"Analytics: {build_report(run_id)}")
+    except ImportError:
+        log("Analytics skipped — pip install matplotlib")
+    except Exception as exc:
+        log(f"Analytics skipped ({brief_error(exc)})")
     try:
         summary_path = write_session_summary(reports)
         log(f"Session summary saved: {summary_path}")

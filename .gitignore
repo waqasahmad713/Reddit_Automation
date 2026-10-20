@@ -2,6 +2,8 @@
 omniroute/.env
 data/*
 !data/.gitkeep
+logs/
+reports/
 __pycache__/
 *.pyc
 .venv/

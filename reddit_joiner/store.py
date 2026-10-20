@@ -770,6 +770,173 @@ def record_account_join(user_id: str, subreddit: str, account: str = "") -> None
         )
 
 
+SITTING_FIELDS = (
+    "user_id", "account", "age_days", "status", "minutes", "upvotes", "upvote_target",
+    "comments", "comment_target", "joins", "posts", "karma", "ip", "gallery_steps", "sitting_ok",
+)
+
+
+def _ensure_sittings(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sittings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            day TEXT NOT NULL,
+            user_id TEXT,
+            account TEXT,
+            age_days REAL,
+            status TEXT,
+            minutes REAL,
+            upvotes INTEGER,
+            upvote_target INTEGER,
+            comments INTEGER,
+            comment_target INTEGER,
+            joins INTEGER,
+            posts INTEGER,
+            karma INTEGER,
+            ip TEXT,
+            gallery_steps INTEGER,
+            sitting_ok INTEGER
+        )
+        """
+    )
+
+
+def record_sittings(run_id: str, rows: List[Dict[str, Any]]) -> int:
+    """Store one row per account sitting of this run."""
+    if not rows:
+        return 0
+    now = datetime.now()
+    stamp = now.isoformat(timespec="seconds")
+    day = now.strftime("%Y-%m-%d")
+    init_db()
+    with _connect() as conn:
+        _ensure_sittings(conn)
+        cols = ", ".join(SITTING_FIELDS)
+        marks = ", ".join("?" for _ in SITTING_FIELDS)
+        conn.executemany(
+            f"INSERT INTO sittings (run_id, created_at, day, {cols}) VALUES (?, ?, ?, {marks})",
+            [
+                (run_id, stamp, day, *[row.get(name) for name in SITTING_FIELDS])
+                for row in rows
+            ],
+        )
+    return len(rows)
+
+
+def _ensure_account_ips(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_ips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            day TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            account TEXT,
+            ip TEXT NOT NULL,
+            UNIQUE (user_id, day, ip)
+        )
+        """
+    )
+
+
+def record_account_ip(user_id: str, ip: str, account: str = "") -> List[str]:
+    """
+    Store this account's proxy IP once per day. Returns the names of other
+    accounts already seen on the same IP today.
+    """
+    address = (ip or "").strip()
+    if not user_id or not address:
+        return []
+    day = datetime.now().strftime("%Y-%m-%d")
+    init_db()
+    with _connect() as conn:
+        _ensure_account_ips(conn)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO account_ips (created_at, day, user_id, account, ip)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (datetime.now().isoformat(timespec="seconds"), day, user_id, account or user_id, address),
+        )
+        rows = conn.execute(
+            """
+            SELECT DISTINCT user_id, account FROM account_ips
+            WHERE day = ? AND ip = ? AND user_id != ?
+            """,
+            (day, address, user_id),
+        ).fetchall()
+    return [str(row["account"] or row["user_id"]) for row in rows]
+
+
+def accounts_on_ip(ip: str, day: str = "") -> List[str]:
+    address = (ip or "").strip()
+    if not address:
+        return []
+    when = day or datetime.now().strftime("%Y-%m-%d")
+    init_db()
+    with _connect() as conn:
+        _ensure_account_ips(conn)
+        rows = conn.execute(
+            "SELECT DISTINCT user_id FROM account_ips WHERE day = ? AND ip = ?",
+            (when, address),
+        ).fetchall()
+    return [str(row["user_id"]) for row in rows]
+
+
+def _ensure_join_failures(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS join_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            user_id TEXT,
+            subreddit TEXT,
+            reason TEXT
+        )
+        """
+    )
+
+
+def record_join_failure(user_id: str, subreddit: str, reason: str = "") -> int:
+    """Store one failed Join; returns how many different accounts failed on this sub."""
+    name = (subreddit or "").strip().lstrip("r/").lower()
+    if not name:
+        return 0
+    init_db()
+    with _connect() as conn:
+        _ensure_join_failures(conn)
+        conn.execute(
+            """
+            INSERT INTO join_failures (created_at, user_id, subreddit, reason)
+            VALUES (?, ?, ?, ?)
+            """,
+            (datetime.now().isoformat(timespec="seconds"), user_id or "", name, reason),
+        )
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM join_failures WHERE subreddit = ?",
+            (name,),
+        ).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def join_blocked_subs(min_accounts: int = 3) -> set:
+    """Subs where at least min_accounts different accounts could not Join."""
+    init_db()
+    with _connect() as conn:
+        _ensure_join_failures(conn)
+        rows = conn.execute(
+            """
+            SELECT subreddit FROM join_failures
+            GROUP BY subreddit HAVING COUNT(DISTINCT user_id) >= ?
+            """,
+            (int(min_accounts),),
+        ).fetchall()
+    return {str(row["subreddit"] or "").lower() for row in rows if row["subreddit"]}
+
+
 def joined_subs_for_account(user_id: str) -> List[str]:
     if not user_id:
         return []

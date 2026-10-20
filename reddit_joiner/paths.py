@@ -30,6 +30,8 @@ JOINER_LOG = DATA_DIR / "joiner_run.log"
 SESSION_PATTERNS_PATH = DATA_DIR / "session_patterns.json"
 COMMUNITY_MEMORY_PATH = DATA_DIR / "community_memory.json"
 SUMMARIES_DIR = DATA_DIR / "summaries"
+LOGS_DIR = PROJECT_ROOT / "logs"
+REPORTS_DIR = PROJECT_ROOT / "reports"
 
 
 def ensure_runtime_dirs() -> None:

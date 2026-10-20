@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import random
@@ -69,6 +70,36 @@ _STOP = {
 }
 
 
+def _content_words(text: str) -> List[str]:
+    """Distinct lowercase words of 4+ letters that are not filler, in order."""
+    seen: List[str] = []
+    for word in re.findall(r"[A-Za-z][A-Za-z']{3,}", text or ""):
+        low = word.lower().strip("'")
+        if low.endswith("'s"):
+            low = low[:-2]
+        if len(low) >= 4 and low not in _STOP and low not in seen:
+            seen.append(low)
+    return seen
+
+
+def core_ask(title: str, body: str = "") -> str:
+    """The one thing the poster wants answered, in their words (max ~160 chars)."""
+    head = re.sub(r"\s+", " ", (title or "").strip())
+    if head.endswith("?") or "?" in head:
+        return head[:160]
+    text = re.sub(r"\s+", " ", (body or "").strip())
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    for sent in sentences:
+        if sent.endswith("?"):
+            return sent[:160]
+    patterns = _HELP_PATTERNS + _SUGGEST_PATTERNS
+    for sent in sentences:
+        low = sent.lower()
+        if any(re.search(pat, low) for pat in patterns):
+            return sent[:160]
+    return head[:160]
+
+
 def analyze_post(title: str, body: str, subreddit: str = "") -> Dict[str, object]:
     """Read the post and return mood, topic, intent, and keywords for a matching comment."""
     blob = f"{title or ''}\n{body or ''}"
@@ -79,14 +110,16 @@ def analyze_post(title: str, body: str, subreddit: str = "") -> Dict[str, object
         mood = "positive"
     else:
         mood = "neutral"
-    words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z']{2,}", title or "")]
-    keywords = [w for w in words if w not in _STOP][:8]
-    topic = " ".join(keywords[:6]) or re.sub(r"\s+", " ", (title or "this").strip())[:70]
+    title_words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z']{2,}", title or "")]
+    title_keys = [w for w in title_words if w not in _STOP][:8]
+    keywords = _content_words(f"{title or ''} {(body or '')[:500]}")[:16]
+    topic = " ".join(title_keys[:6]) or re.sub(r"\s+", " ", (title or "this").strip())[:70]
     intent = classify_post_intent(title, body)
     return {
         "sentiment": score,
         "mood": mood,
         "intent": intent,
+        "ask": core_ask(title, body),
         "keywords": keywords,
         "topic": topic,
         "subreddit": (subreddit or "").strip(),
@@ -277,13 +310,16 @@ def local_comment_for_post(analysis: Dict[str, object]) -> str:
     raise RuntimeError("no title fallback for comments")
 
 
-def _clean_comment(text: str) -> str:
+def _clean_comment(text: str, expand: bool = True) -> str:
     value = _strip_think(text or "").strip()
     value = _strip_fences(value)
     value = _unwrap_comment_quotes(value)
     value = re.sub(r"(?is)^(?:sure|okay|ok|here(?:'s| is)|comment:)\s*[:\-]*\s*", "", value)
     value = _strip_comment_chars(value)
-    value = _expand_contractions(value)
+    if expand:
+        value = _expand_contractions(value)
+    else:
+        value = value.replace("’", "'").replace("‘", "'")
     parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", value) if part.strip()]
     if not parts:
         return ""
@@ -905,21 +941,62 @@ def _comment_uses_post(comment: str, title: str, body: str) -> bool:
     return any(word in blob for word in words[:12])
 
 
-def _poster_own_words(title: str, body: str) -> str:
-    """A short stretch of the poster's own wording to echo in the reply."""
-    blob = re.sub(r"\s+", " ", f"{title or ''} {body or ''}").strip()
-    quoted = re.findall(r"\"([^\"]{8,80})\"", blob)
-    if quoted:
-        return quoted[0].strip()
-    for sent in re.split(r"(?<=[.!?])\s+", blob):
-        words = [w for w in sent.split() if w]
-        if 4 <= len(words) <= 12:
-            return " ".join(words)
-    words = blob.split()
-    if len(words) >= 4:
-        return " ".join(words[:8])
-    return blob[:80]
+FULL_WORDS_SHARE = 0.5  # share of comments written without contractions
+COPIED_RUN_WORDS = 6
+REPLY_SIMILARITY_MAX = 0.6
 
+_GENERIC_OPENERS = re.compile(
+    r"^\s*(?:great question|good question|totally agree|i totally agree|this is so true|"
+    r"so true|same here|good luck|best of luck|you got this|you've got this|"
+    r"interesting|following|love this|this!|this\.)\b",
+    re.I,
+)
+_FILLER_ONLY = re.compile(
+    r"^\s*(?:it depends|depends|same|this|agreed|following|good luck|nice|interesting|"
+    r"great question|you got this|love this)[\s.!,]*$",
+    re.I,
+)
+
+
+def _stem(word: str) -> str:
+    low = word.lower()
+    for suffix in ("ing", "ers", "er", "ed", "es", "s"):
+        if len(low) - len(suffix) >= 4 and low.endswith(suffix):
+            return low[: -len(suffix)]
+    return low
+
+
+def _word_runs(text: str, size: int) -> set:
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    return {" ".join(words[i : i + size]) for i in range(0, max(0, len(words) - size + 1))}
+
+
+def comment_fits_post(
+    comment: str,
+    title: str,
+    body: str = "",
+    replies: Optional[Sequence[str]] = None,
+) -> Tuple[bool, str]:
+    """On topic, not filler, not copied from the post or an existing reply."""
+    text = (comment or "").strip()
+    if not text:
+        return False, "empty"
+    if _FILLER_ONLY.match(text):
+        return False, "generic filler line"
+    if _GENERIC_OPENERS.match(text):
+        return False, "generic opener"
+    post_stems = {_stem(word) for word in _content_words(f"{title or ''} {(body or '')[:1500]}")}
+    mine = {_stem(word) for word in _content_words(text)}
+    if post_stems and not (mine & post_stems):
+        return False, "off topic (no word from the post)"
+    if _word_runs(text, COPIED_RUN_WORDS) & _word_runs(f"{title or ''} {body or ''}", COPIED_RUN_WORDS):
+        return False, f"copied {COPIED_RUN_WORDS}+ words from the post"
+    low = text.lower()
+    for reply in replies or []:
+        other = str(reply or "").strip().lower()
+        if other and difflib.SequenceMatcher(None, low, other[: len(low) * 2]).ratio() > REPLY_SIMILARITY_MAX:
+            return False, "repeats an existing reply"
+    return True, ""
 
 def generate_ai_comment(
     title: str,
@@ -929,6 +1006,7 @@ def generate_ai_comment(
     analysis: Optional[Dict[str, object]] = None,
     rules: str = "",
     example: str = "",
+    replies: Optional[Sequence[str]] = None,
 ) -> Tuple[str, str]:
     """
     Return (comment, provider). Raises RuntimeError if no provider is configured
@@ -985,22 +1063,44 @@ def generate_ai_comment(
         if sample
         else ""
     )
-    phrase = _poster_own_words(title, body)
-    phrase_line = (
-        f' Use this phrase from the poster, in their own words: "{phrase}".'
-        if phrase
-        else " Use one detail from the post in the poster's own words."
+    ask = str(info.get("ask") or core_ask(title, body)).strip()
+    ask_line = (
+        f"What they want: {ask}\n"
+        "Answer that directly in your first words. Give one concrete thing: "
+        "a name, a number, a step, or a reason. No warm-up line. "
+    )
+    detail_line = (
+        " Refer to one specific detail from the post in your own words. "
+        "Never copy more than 4 words in a row from the post."
+    )
+    seen = [re.sub(r"\s+", " ", str(item or "")).strip()[:200] for item in (replies or [])]
+    seen = [item for item in seen if item][:3]
+    replies_line = (
+        " Replies already there: "
+        + " | ".join(f'"{item}"' for item in seen)
+        + ". Do not repeat them. Add a different point, or agree briefly and add one new detail."
+        if seen
+        else ""
+    )
+    full_words = random.random() < FULL_WORDS_SHARE
+    style_line = (
+        'Write full words. Do not use contractions. Write "I have" not "I\'ve", '
+        '"do not" not "don\'t", "I would" not "I\'d", "it is" not "it\'s". '
+        if full_words
+        else "Write casually. Normal contractions are fine (don't, it's, I'd). "
     )
     prompt = (
         f"Write one Reddit comment for {place}, as if you typed it on your phone. "
-        f"{tone_line} {mood_line} {intent_line}{rule_line}{example_line}{phrase_line} "
+        f"{ask_line}"
+        f"{tone_line} {mood_line} {intent_line}{rule_line}{example_line}{detail_line}"
+        f"{replies_line} "
         "One short line is enough. Stay under 140 characters. Two sentences only if both still fit. "
         "Do not pad. Do not narrate yourself. "
         "Do not write I sound, that sounds, as someone who, in my humble opinion, "
         "just my two cents, hope this helps, I hear you, or it is important to note. "
+        "Do not open with great question, totally agree, same here, or good luck. "
         "Do not end with a question every time. Only ask if you actually need an answer. "
-        'Write full words. Do not use contractions. Write "I have" not "I\'ve", '
-        '"do not" not "don\'t", "I would" not "I\'d", "it is" not "it\'s". '
+        f"{style_line}"
         "Keep commas, apostrophes, and question marks if you need them. "
         "Do not wrap the whole comment in quotes. No hashtags, no asterisks, no username, "
         "no asking for upvotes. "
@@ -1027,10 +1127,14 @@ def generate_ai_comment(
         raise RuntimeError(
             f"comment model timed out ({_scrub_secret(str(exc))})"
         ) from exc
-    cleaned = _clean_comment(text)
+    cleaned = _clean_comment(text, expand=full_words)
     if not cleaned:
         raise RuntimeError("AI comment was empty or looked automated")
-    return cleaned, f"{provider}/{picked}"
+    ok, why = comment_fits_post(cleaned, title, body, seen)
+    if not ok:
+        raise RuntimeError(f"draft rejected — {why}")
+    style = "full" if full_words else "casual"
+    return cleaned, f"{provider}/{picked}/{style}"
 
 
 def generate_ai_post(

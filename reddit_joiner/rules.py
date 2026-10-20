@@ -208,22 +208,25 @@ def rules_were_read(rules: Optional[SubredditRules]) -> bool:
     return bool(rules.rule_count or rules.summary or rules.raw)
 
 
+HUMOUR_TONES = {"witty", "funny"}
+
+
 def tone_fits(rules: Optional[SubredditRules], tone: str) -> bool:
     style = (tone or "").strip().lower()
     if not rules_were_read(rules):
         # A failed rules read produces an object with every flag False, which
         # used to read as "this community bans nothing". Humour is the tone that
         # gets comments removed, so withhold it until the rules are actually known.
-        return style != "funny"
-    if style == "funny" and rules.flags.get("no_humor"):
+        return style not in HUMOUR_TONES
+    if style in HUMOUR_TONES and rules.flags.get("no_humor"):
         return False
     return True
 
 
 def safer_tone(rules: Optional[SubredditRules], tone: str) -> str:
-    style = (tone or "friendly").strip().lower() or "friendly"
+    style = (tone or "validating").strip().lower() or "validating"
     if not tone_fits(rules, style):
-        return "neutral"
+        return "validating"
     return style
 
 

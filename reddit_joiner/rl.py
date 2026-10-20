@@ -27,25 +27,19 @@ from reddit_joiner.paths import DB_PATH as _DB_PATH, RL_MODEL_FILE as _RL_MODEL_
 DEFAULT_MODEL = str(_RL_MODEL_FILE)
 DEFAULT_DB = str(_DB_PATH)
 
-COMMENT_ACTIONS = (
-    "skip",
-    "comment:friendly",
-    "comment:expert",
-    "comment:funny",
-    "comment:neutral",
-)
-COMMENT_TONE_ACTIONS = (
-    "comment:friendly",
-    "comment:expert",
-    "comment:funny",
-    "comment:neutral",
-)
+# Comment strategies: formatting = TL;DR + bold bullets, validating = agree +
+# detail + short personal mirror, curious = compliment + open question,
+# witty = 1-2 light self-deprecating lines.
+COMMENT_STRATEGIES = ("formatting", "validating", "curious", "witty")
+DEFAULT_COMMENT_STRATEGY = "validating"
+COMMENT_TONE_ACTIONS = tuple(f"comment:{name}" for name in COMMENT_STRATEGIES)
+COMMENT_ACTIONS = ("skip",) + COMMENT_TONE_ACTIONS
 JOIN_ACTIONS = (
     "join:comment",
     "join:lurk",
 )
 
-ARCH_VERSION = 4
+ARCH_VERSION = 5
 # Rewards are clipped before training. Raw values span -20..+15, and a single
 # -20 drowns out dozens of ordinary outcomes in an MSE gradient.
 REWARD_CLIP = 10.0
@@ -1327,12 +1321,12 @@ def set_agent(agent: Optional[RLAgent]) -> None:
 def parse_comment_action(action: str) -> Tuple[bool, str]:
     raw = (action or "skip").strip().lower()
     if raw == "skip" or raw.startswith("skip"):
-        return False, "friendly"
+        return False, DEFAULT_COMMENT_STRATEGY
     if raw.startswith("comment:"):
-        return True, raw.split(":", 1)[-1] or "friendly"
+        return True, raw.split(":", 1)[-1] or DEFAULT_COMMENT_STRATEGY
     if raw in {"comment", "yes", "true"}:
-        return True, "friendly"
-    return False, "friendly"
+        return True, DEFAULT_COMMENT_STRATEGY
+    return False, DEFAULT_COMMENT_STRATEGY
 
 
 def parse_join_action(action: str) -> str:

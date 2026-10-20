@@ -88,7 +88,7 @@ def _bucket(data: Dict[str, Any], name: str) -> Dict[str, Any]:
 
 
 def _tone_bucket(community: Dict[str, Any], tone: str) -> Dict[str, Any]:
-    key = str(tone or "neutral").strip().lower() or "neutral"
+    key = str(tone or "validating").strip().lower() or "validating"
     tones = community.setdefault("tones", {})
     row = tones.get(key)
     if not isinstance(row, dict):
@@ -275,10 +275,10 @@ def record_comment_outcome(
             removed = int(row.get("removed") or 0)
             if removed >= TONE_SKIP_AFTER:
                 community.setdefault("skip_tones", {})
-                community["skip_tones"][str(tone or "neutral").strip().lower()] = (
+                community["skip_tones"][str(tone or "validating").strip().lower()] = (
                     time.time() + TONE_SKIP_SECONDS
                 )
-                skipped.append(str(tone or "neutral").strip().lower())
+                skipped.append(str(tone or "validating").strip().lower())
             total_removed = int(community.get("removed") or 0)
             if total_removed >= COMMUNITY_SKIP_AFTER:
                 extra = COMMUNITY_SKIP_REPEAT if total_removed >= COMMUNITY_SKIP_AFTER + 2 else COMMUNITY_SKIP_SECONDS

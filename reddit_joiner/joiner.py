@@ -885,6 +885,7 @@ def unique_session_plan(
             _batch_style_fps.add(fingerprint)
             return True
 
+    race_logged = False
     for _ in range(40):
         style = _apply(roll_session_style(user_id, label))
         subs = pick_session_subreddits(user_id, karma, age_days)
@@ -892,11 +893,32 @@ def unique_session_plan(
         if pattern_already_used(user_id, fingerprint):
             last_style, last_subs, last_fp = style, subs, fingerprint
             continue
+        if not reserve_subreddits(user_id, subs):
+            if not race_logged:
+                taken = [name for name in subs if subreddit_taken_by_other(user_id, name)]
+                log(
+                    f"[Profile {label}] "
+                    + ", ".join(f"r/{name}" for name in taken or subs)
+                    + " planned by another open account — picking again"
+                )
+                race_logged = True
+            last_style, last_subs, last_fp = style, subs, fingerprint
+            continue
         if not _claim(fingerprint):
+            release_live_subreddits(user_id, subs)
             last_style, last_subs, last_fp = style, subs, fingerprint
             continue
         remember_session_pattern(user_id, fingerprint)
         return style, subs, fingerprint
+    for _ in range(5):
+        if reserve_subreddits(user_id, last_subs):
+            break
+        last_subs = pick_session_subreddits(user_id, karma, age_days)
+    else:
+        log(
+            f"[Profile {label}] Every sheet community is planned by another open account "
+            "— sharing the least-used ones"
+        )
     last_style = _apply(last_style)
     last_style.leftover_mode = f"{last_style.leftover_mode}-{secrets.token_hex(2)}"
     extras = list(last_style.menu.home_extras)
@@ -1089,6 +1111,34 @@ def maybe_glance_inbox(
         log(f"[Profile {label}] Inbox watchdog — moving on")
 
 
+NEWS_SUBREDDITS = (
+    "news",
+    "worldnews",
+    "unitedkingdom",
+    "uknews",
+    "UpliftingNews",
+    "nottheonion",
+    "technology",
+    "science",
+    "europe",
+    "ukpolitics",
+)
+
+
+def pick_news_subreddit(user_id: str) -> str:
+    """A news community no other open account has planned, least-used first."""
+    rng = _rng()
+    pool = [
+        name
+        for name in NEWS_SUBREDDITS
+        if not is_blocked_subreddit(name) and not subreddit_taken_by_other(user_id, name)
+    ]
+    for name in sorted(pool, key=lambda item: (run_subreddit_uses(item), rng.random())):
+        if reserve_subreddits(user_id, [name]):
+            return name
+    return ""
+
+
 def maybe_read_news(
     driver: WebDriver, label: str, stats: AccountSummary, force: bool = False
 ) -> None:
@@ -1099,10 +1149,17 @@ def maybe_read_news(
     if not force and _rng().random() > 0.40:
         return
     started = time.time()
+    user_id = str(stats.user_id or getattr(_tls, "batch_user_id", "") or "")
+    name = pick_news_subreddit(user_id)
+    if not name:
+        log(f"[Profile {label}] News skipped — every news community is open on another account")
+        return
     try:
-        opened = _click_named_nav(driver, ("news",))
-        if not opened:
-            navigate(driver, "https://www.reddit.com/r/news/", label)
+        if not open_exclusive_community(
+            driver, label, user_id, name, f"https://www.reddit.com/r/{name}/", wait=0.0
+        ):
+            return
+        log(f"[Profile {label}] Reading news in r/{name}")
         human_sleep(_rng().uniform(6.0, 14.0))
         post = _random_post_title(driver)
         if post is not None and human_click(driver, post):
@@ -1416,6 +1473,74 @@ def held_subreddits(user_id: str) -> List[str]:
         return [key for key, holder in _SUBREDDIT_BUSY.items() if holder == owner]
 
 
+# Planned communities for the whole run: open accounts never share one, sheet
+# communities are spread by use count, and an explore belongs to one account.
+_RUN_SUB_LOCK = threading.Lock()
+_LIVE_SUB_OWNER: Dict[str, str] = {}
+_RUN_SUB_USE: Dict[str, int] = {}
+_RUN_EXPLORE_OWNER: Dict[str, str] = {}
+
+
+def subreddit_taken_by_other(user_id: str, name: str, *, explore: bool = False) -> bool:
+    key = _community_key(name)
+    owner = str(user_id or "")
+    if not key or _community_is_shared_listing(name):
+        return False
+    with _RUN_SUB_LOCK:
+        holder = _LIVE_SUB_OWNER.get(key)
+        if holder and holder != owner:
+            return True
+        if explore:
+            first = _RUN_EXPLORE_OWNER.get(key)
+            return bool(first and first != owner)
+    return False
+
+
+def run_subreddit_uses(name: str) -> int:
+    with _RUN_SUB_LOCK:
+        return int(_RUN_SUB_USE.get(_community_key(name), 0))
+
+
+def reserve_subreddits(user_id: str, names: Iterable[str], *, explore: bool = False) -> bool:
+    """Reserve every name for this account, or none of them."""
+    owner = str(user_id or "")
+    keys = [
+        _community_key(name)
+        for name in names
+        if _community_key(name) and not _community_is_shared_listing(name)
+    ]
+    if not owner or not keys:
+        return True
+    with _RUN_SUB_LOCK:
+        for key in keys:
+            holder = _LIVE_SUB_OWNER.get(key)
+            if holder and holder != owner:
+                return False
+            if explore:
+                first = _RUN_EXPLORE_OWNER.get(key)
+                if first and first != owner:
+                    return False
+        for key in keys:
+            if _LIVE_SUB_OWNER.get(key) != owner:
+                _RUN_SUB_USE[key] = _RUN_SUB_USE.get(key, 0) + 1
+            _LIVE_SUB_OWNER[key] = owner
+            if explore:
+                _RUN_EXPLORE_OWNER[key] = owner
+    return True
+
+
+def release_live_subreddits(user_id: str, names: Optional[Iterable[str]] = None) -> None:
+    """Free this account's planned communities; run use counts stay."""
+    owner = str(user_id or "")
+    if not owner:
+        return
+    only = {_community_key(name) for name in names} if names is not None else None
+    with _RUN_SUB_LOCK:
+        for key, holder in list(_LIVE_SUB_OWNER.items()):
+            if holder == owner and (only is None or key in only):
+                _LIVE_SUB_OWNER.pop(key, None)
+
+
 def open_exclusive_community(
     driver: WebDriver,
     label: str,
@@ -1682,6 +1807,9 @@ def discover_explore_subreddits(
     def _take(name: str, source: str) -> bool:
         clean = _usable_explore_name(name, skip)
         if not clean:
+            return False
+        if not reserve_subreddits(user_id, [clean], explore=True):
+            skip.add(clean.lower())
             return False
         found.append(clean)
         skip.add(clean.lower())
@@ -2708,12 +2836,9 @@ def _rl_comment_choices(
                     continue
             except Exception:
                 pass
-            if strict >= 0.4 and tone == "funny":
+            if strict >= 0.4 and tone == "witty":
                 continue
-            if (flags.get("account_gate") or flags.get("no_humor") or warming or too_new) and tone in {
-                "funny",
-                "expert",
-            }:
+            if (flags.get("account_gate") or flags.get("no_humor") or warming or too_new) and tone == "witty":
                 continue
         elif action.lower() in blocked:
             continue
@@ -3298,21 +3423,25 @@ def pick_session_subreddits(
         sheet.append(name)
     if not sheet:
         return []
+
+    def _least_used_first(names: List[str]) -> List[str]:
+        rng = _rng()
+        return sorted(names, key=lambda name: (run_subreddit_uses(name), rng.random()))
+
+    free = [name for name in sheet if not subreddit_taken_by_other(user_id, name)] or list(sheet)
     recent = recent_session_subreddits(user_id, SUBREDDIT_ROTATION_RUNS)
-    count = min(_rng().randint(*SUBREDDITS_PER_SESSION), len(sheet))
-    fresh = [name for name in sheet if name.lower() not in recent]
+    count = min(_rng().randint(*SUBREDDITS_PER_SESSION), len(free))
+    fresh = [name for name in free if name.lower() not in recent]
     if len(fresh) < count:
         last_run = set()
         runs = _subreddit_run_names(user_id, 1)
         if runs:
             last_run = {name.lower() for name in runs[-1]}
-        fresh = [name for name in sheet if name.lower() not in last_run] or list(sheet)
-    _rng().shuffle(fresh)
-    picked = fresh[:count]
+        fresh = [name for name in free if name.lower() not in last_run] or list(free)
+    picked = _least_used_first(fresh)[:count]
     if len(picked) < count:
-        extras = [name for name in sheet if name not in picked]
-        _rng().shuffle(extras)
-        picked.extend(extras[: count - len(picked)])
+        extras = [name for name in free if name not in picked]
+        picked.extend(_least_used_first(extras)[: count - len(picked)])
     return picked
 
 
@@ -9077,8 +9206,15 @@ def _comment_blocked_on_page(driver: WebDriver) -> str:
     return ""
 
 
+def _comment_needle(text: str) -> str:
+    """Comment text as Reddit renders it: no `**`, bullet dashes, or TL;DR label."""
+    value = re.sub(r"\*\*|^\s*-\s+", "", text or "", flags=re.M)
+    value = re.sub(r"^\s*tl;dr:\s*", "", value, flags=re.I)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _composer_contains(driver: WebDriver, text: str) -> bool:
-    snippet = re.sub(r"\s+", " ", (text or "")).strip()[:18].lower()
+    snippet = _comment_needle(text)[:18].lower()
     if len(snippet) < 8:
         return False
     try:
@@ -9089,7 +9225,7 @@ def _composer_contains(driver: WebDriver, text: str) -> bool:
 
 
 def _comment_landed(driver: WebDriver, text: str) -> str:
-    snippet = re.sub(r"\s+", " ", (text or "")).strip()[:28]
+    snippet = _comment_needle(text)[:28]
     try:
         result = driver.execute_script(_COMMENT_VERIFY_JS, snippet)
     except Exception:
@@ -9165,7 +9301,7 @@ return '';
 
 def extract_comment_permalink(driver: WebDriver, text: str, author: str = "") -> str:
     """Return the Reddit permalink for a comment that is already visible on the post."""
-    snippet = re.sub(r"\s+", " ", (text or "")).strip()[:28]
+    snippet = _comment_needle(text)[:28]
     if len(snippet) < 8:
         return ""
     try:
@@ -9917,7 +10053,7 @@ def maybe_ai_comment_on_opened_post(
         log(f"{prefix}Read the thread and changed mind — leaving without commenting")
         return False
 
-    tone = "neutral" if mood == "negative" else "friendly"
+    tone = "validating"
     action = f"comment:{tone}"
     state = _rl_state(stats, subreddit, title, body, sentiment=score, kind=kind, rules=rules)
     example = live_comment_example(subreddit)
@@ -9976,6 +10112,8 @@ def maybe_ai_comment_on_opened_post(
             from reddit_joiner.rules import safer_tone
 
             fitted = safer_tone(rules, tone)
+            if fitted == "witty" and mood == "negative":
+                fitted = "validating"
             if fitted != tone:
                 log(f"{prefix}r/{subreddit} rules discourage {tone} — using {fitted}")
                 _rl_learn(
@@ -12156,7 +12294,7 @@ def enqueue_unscored_comments_for_rl() -> int:
                     age = float(RL_STATUS_MIN_AGE)
             if age < float(RL_STATUS_MIN_AGE):
                 continue
-            tone = str(row.get("tone") or "neutral").strip().lower() or "neutral"
+            tone = str(row.get("tone") or "validating").strip().lower() or "validating"
             method = str(row.get("method") or "").strip().lower()
             kind = "sheet" if method == "sheet" else "browse"
             state = build_state_for_logged_comment(row, kind=kind)
@@ -13273,7 +13411,7 @@ def maybe_leave_weekly_comments(
                             subreddit=subreddit_from_url(item["link"]),
                             post_body=str(info.get("body") or "")[:500],
                             comment_id=comment_id,
-                            tone="neutral",
+                            tone="validating",
                         )
                     except Exception:
                         pass
@@ -13358,7 +13496,7 @@ def maybe_leave_weekly_comments(
                         )
                         agent.queue_delayed(
                             sheet_state,
-                            "comment:neutral",
+                            "comment:validating",
                             comment_url or item["link"],
                             "comment",
                         )
@@ -14945,6 +15083,7 @@ def process_profile(
             stats.post_note = brief_error(exc)
     finally:
         release_all_held_subreddits(user_id)
+        release_live_subreddits(user_id)
         set_session_deadline(None)
         if (
             driver is not None
@@ -15200,9 +15339,27 @@ def run_profiles(
 # MAIN
 # =============================================================================
 
+ANALYTICS_OPEN_BROWSER = True  # open reports/latest.html when a run completes
+
+
+def open_report_in_browser(path: str) -> bool:
+    if not ANALYTICS_OPEN_BROWSER or not path or stop_requested():
+        return False
+    try:
+        import webbrowser
+
+        opened = bool(webbrowser.open(Path(path).resolve().as_uri()))
+    except Exception:
+        opened = False
+    if not opened:
+        log(f"Could not open the report — open {path}")
+    return opened
+
+
 def main() -> int:
     global PROFILE_IDS, SUBREDDITS, SUBREDDITS_TO_BROWSE
     install_stop_handlers()
+    run_started_at = time.time()
     run_log = start_run_log()
     if run_log:
         log(f"Run log: {run_log} (proxy logins and passwords redacted)")
@@ -15480,10 +15637,17 @@ def main() -> int:
         record_sittings(run_id, sitting_rows(reports))
     except Exception as exc:
         log(f"Could not save sittings for analytics ({brief_error(exc)})")
+    report_path = ""
+    analysis_lines: List[str] = []
     try:
-        from reddit_joiner.analytics import build_report
+        from reddit_joiner.analytics import build_report_with_analysis, format_analysis
 
-        log(f"Analytics: {build_report(run_id)}")
+        report_path, sections = build_report_with_analysis(
+            run_id,
+            run_log=str(_RUN_LOG_PATH) if _RUN_LOG_PATH else None,
+            run_started_at=run_started_at,
+        )
+        analysis_lines = format_analysis(sections)
     except ImportError:
         log("Analytics skipped — pip install matplotlib")
     except Exception as exc:
@@ -15512,6 +15676,13 @@ def main() -> int:
             )
         except Exception as exc:
             log(f"Could not save RL model ({brief_error(exc)})")
+    if analysis_lines:
+        log("")
+        for line in analysis_lines:
+            log(line)
+    if report_path:
+        log(f"Charts: {report_path}")
+        open_report_in_browser(report_path)
     log("Stopped" if stop_requested() else "All profiles processed")
     return 0
 

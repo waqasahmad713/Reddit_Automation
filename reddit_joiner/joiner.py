@@ -6098,53 +6098,138 @@ def human_click(driver: WebDriver, element: Any) -> bool:
         return False
 
 
-# Welcome / cookie / NSFW dialogs. Never click a bare "Close" on the page —
-# that can close the AdsPower tab.
+# Cookie / NSFW / app prompt / tour / rules / quarantine / nag overlays.
+# Only controls inside an overlay are clicked. Never click a bare "Close" on
+# the page — that can close the AdsPower tab.
 _DISMISS_JS = r"""
-const LABELS = ['done', 'next', 'got it', 'continue', 'accept all', 'accept', 'not now', 'no thanks', 'skip'];
+const SAFE = [
+  'accept all cookies', 'accept all', 'allow all', 'accept',
+  'continue in browser', 'use browser', 'stay on web',
+  'i understand and wish to continue', 'i understand', 'i agree',
+  'done', 'next', 'got it', 'continue', 'skip',
+  'not now', 'no thanks', 'maybe later', 'remind me later',
+];
+const ADULT = ['over 18', '18 or older', '18 years or older'];
+const NEVER = /\b(leave|delete|log ?out|sign ?out|log ?in|sign ?in|sign ?up|report|block|remove|discard|ban|mute|unsubscribe|unjoin|with (google|apple|email|phone))\b/;
+const CLOSE = ['close', 'dismiss'];
+const NAG_HINT = /\b(cookie|privacy|app|premium|notification|email|welcome|interests?|try reddit|get the reddit)\b/;
+const HOSTS = new Set([
+  'dialog', 'faceplate-modal', 'faceplate-dialog', 'faceplate-banner',
+  'shreddit-modal', 'shreddit-overlay', 'shreddit-async-loader-modal',
+  'reddit-cookie-banner', 'shreddit-cookie-banner', 'cookie-banner',
+  'shreddit-blocking-modal', 'xpromo-nsfw-blocking-modal', 'nsfw-blocking-modal',
+]);
 function collect(root, out) {
   try { root.querySelectorAll('button, a, [role="button"]').forEach(el => out.push(el)); } catch (e) {}
   try {
     root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) collect(el.shadowRoot, out); });
   } catch (e) {}
 }
+function visible(el) {
+  try {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return r.width > 2 && r.height > 2 && st.visibility !== 'hidden' && st.display !== 'none';
+  } catch (e) { return false; }
+}
+function parentOf(node) {
+  if (node.parentElement) return node.parentElement;
+  try {
+    const root = node.getRootNode && node.getRootNode();
+    if (root && root.host) return root.host;
+  } catch (e) {}
+  return null;
+}
+function isOverlay(node) {
+  const tag = (node.tagName || '').toLowerCase();
+  if (HOSTS.has(tag)) return true;
+  try {
+    if (node.getAttribute('role') === 'dialog' || node.getAttribute('role') === 'alertdialog') return true;
+    if (node.getAttribute('aria-modal') === 'true') return true;
+  } catch (e) {}
+  try {
+    const pos = window.getComputedStyle(node).position;
+    if (pos === 'fixed' || pos === 'sticky') {
+      const txt = (node.innerText || node.textContent || '').toLowerCase();
+      if (txt.length < 1500 && /\bcookies?\b/.test(txt)) return true;
+    }
+  } catch (e) {}
+  return false;
+}
+function overlayOf(el) {
+  let node = el;
+  for (let depth = 0; node && depth < 40; depth += 1) {
+    if (node !== el && isOverlay(node)) return node;
+    node = parentOf(node);
+  }
+  return null;
+}
+function textOf(el) {
+  try {
+    return ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || ''))
+      .replace(/\s+/g, ' ').trim().toLowerCase();
+  } catch (e) { return ''; }
+}
+const starts = (t, l) => t === l || t.startsWith(l + ' ');
 const nodes = [];
 collect(document, nodes);
-let clicked = 0;
+const clicked = [];
 for (const el of nodes) {
-  let t = '';
-  try { t = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim().toLowerCase(); } catch (e) {}
-  if (!t) continue;
-  const match = LABELS.some(l => t === l || t.startsWith(l + ' '));
-  let inDialog = false;
-  try {
-    inDialog = !!(el.closest && el.closest('dialog, [role="dialog"], [aria-modal="true"]'));
-  } catch (e) {}
-  if (match && inDialog) {
-    try { el.click(); clicked += 1; } catch (e) {}
-    if (clicked >= 2) break;
+  const t = textOf(el);
+  if (!t || t.length > 80 || NEVER.test(t)) continue;
+  const safe = SAFE.some(l => starts(t, l)) || ADULT.some(l => t.includes(l));
+  let aria = '';
+  try { aria = (el.getAttribute('aria-label') || '').trim().toLowerCase(); } catch (e) {}
+  const icon = (el.innerText || el.textContent || '').trim().toLowerCase();
+  const close = !safe && (CLOSE.some(l => starts(t, l) || starts(aria, l)) || icon === 'x' || icon === '×');
+  if (!safe && !close) continue;
+  if (!visible(el)) continue;
+  const overlay = overlayOf(el);
+  if (!overlay) continue;
+  if (close) {
+    const body = (overlay.innerText || overlay.textContent || '').toLowerCase().slice(0, 1500);
+    if (!NAG_HINT.test(body)) continue;
   }
+  try { el.click(); clicked.push(t); } catch (e) {}
+  if (clicked.length >= 2) break;
 }
 return clicked;
 """
 
+_DISMISS_PASSES = 4
+
 
 def dismiss_popups(driver: WebDriver) -> None:
-    try:
-        clicked = driver.execute_script(_DISMISS_JS)
-        if clicked:
-            time.sleep(_rng().uniform(0.3, 0.8))
-    except JavascriptException:
-        pass
+    cleared: List[str] = []
+    for _ in range(_DISMISS_PASSES):
+        try:
+            clicked = driver.execute_script(_DISMISS_JS) or []
+        except JavascriptException:
+            break
+        if not clicked:
+            break
+        cleared.extend(str(item) for item in clicked)
+        time.sleep(_rng().uniform(0.3, 0.8))
+    if cleared:
+        log(f"Dismissed popup: {', '.join(dict.fromkeys(cleared))}")
 
     xpaths = [
         "//*[@role='dialog']//button[normalize-space()='Done']",
         "//*[@role='dialog']//button[normalize-space()='Next']",
         "//*[@role='dialog']//button[normalize-space()='Got it']",
         "//*[@role='dialog']//button[normalize-space()='Continue']",
+        "//*[@role='dialog']//button[normalize-space()='Not now']",
+        "//*[@role='dialog']//button[normalize-space()='No thanks']",
+        "//*[@role='dialog']//button[normalize-space()='Maybe later']",
+        "//*[@role='dialog']//button[normalize-space()='I agree']",
+        "//*[@role='dialog']//button[normalize-space()='I understand']",
+        "//*[@role='dialog']//button[contains(., 'I understand and wish to continue')]",
+        "//*[@role='dialog']//*[self::button or self::a][contains(., 'Continue in browser')]",
         "//button[normalize-space()='Accept all']",
         "//button[normalize-space()='Accept All']",
+        "//button[normalize-space()='Accept all cookies']",
         "//button[contains(., 'over 18')]",
+        "//button[contains(., '18 or older')]",
     ]
     for xpath in xpaths:
         for element in _visible_elements(driver, By.XPATH, xpath, limit=2):

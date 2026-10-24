@@ -82,6 +82,38 @@ Or, after `run.ps1` is in the folder: `.\run.ps1`. Command Prompt: `run.bat`.
 
 Ctrl+C still saves `data/rl_model.pkl` and `data/activity.db`.
 
+## Targeted warm-up
+
+A separate run for accounts that should warm up inside chosen subreddits. It uses the same sitting as the general warm-up (Home stretches, 4 at a time, the day ladder, comment and post limits, comments.csv / posts.csv). The difference is where communities come from: only your targets and subreddits related to them.
+
+| Warm-up | Linux | Windows | Reads |
+| --- | --- | --- | --- |
+| General | `./run.sh` | `run.bat` / `.\run.ps1` | `accounts.csv`, `subreddits.csv` |
+| Targeted | `./run_targeted.sh` | `run_targeted.bat` / `.\run_targeted.ps1` | `targeted_accounts.csv`, `targeted_subreddits.csv` |
+
+`./run.sh --targeted` and `py -3 -m reddit_joiner --targeted` are the same as the targeted scripts.
+
+`sheets/targeted_accounts.csv`: one AdsPower id per row. `group` is optional; empty means the account uses every target.
+
+```csv
+user_id,enabled,name,notes,group
+k1g5mjai,yes,,,fitness
+k1g5mjc5,yes,,,crypto
+```
+
+`sheets/targeted_subreddits.csv`: the target subreddits, by group.
+
+```csv
+group,subreddit,enabled,notes
+fitness,bodyweightfitness,yes,
+fitness,running,yes,
+crypto,CryptoCurrency,yes,
+```
+
+`sheets/targeted_related.csv` is filled by the bot. Explores read the related list on a target page, search communities for the group or target name, and reuse related subreddits found in earlier sittings. A new one is added only when it is not NSFW, quarantined, private, or under 1,000 members, up to 30 per group. Set `enabled=no` on a row to stop using it.
+
+Targeted summaries are saved as `data/summaries/targeted_session_N.txt`. Comment and post limits are per account across both runs. Keep an account in one sheet only, and do not run both warm-ups at the same time: they would open the same AdsPower profile. The run logs a warning when an account is in both sheets.
+
 ## Comment order
 
 1. OpenAI, when `OPENAI_API_KEY` is set

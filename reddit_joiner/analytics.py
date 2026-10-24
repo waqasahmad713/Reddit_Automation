@@ -537,8 +537,11 @@ def _comment_miss_reason(lines: List[str]) -> str:
     drafted = re.findall(r"Comment draft rejected — (.+)", text)
     if drafted:
         return f"draft rejected ({drafted[-1].strip()[:50]})"
-    if "No help, question, suggestion, or review post left" in text:
-        return "no question/help post left"
+    if (
+        "No commentable text post left" in text
+        or "No help, question, suggestion, or review post left" in text
+    ):
+        return "no commentable text post left"
     if "RL chose lurk" in text:
         return "RL chose lurk"
     if re.search(r"FAILED — ", text):

@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from reddit_joiner.sheets import clean_subreddit_name
+
 # Real communities that often allow self posts from newer accounts.
 # Do not use karma-farm subs.
 NEWBIE_SUBS: List[str] = [
@@ -156,7 +158,7 @@ def candidate_subreddits(
 ) -> List[str]:
     """Ordered list of subs to try, matching how established the account looks."""
     tier = account_tier(karma, age_days)
-    extra_clean = [s.strip().lstrip("r/") for s in (extra or []) if s and str(s).strip()]
+    extra_clean = [clean_subreddit_name(s) for s in (extra or []) if s and str(s).strip()]
     if tier == "new":
         ordered = (
             list(NEWBIE_SUBS)
@@ -194,7 +196,7 @@ def comment_subreddits(karma: int, age_days: float, extra: Optional[List[str]] =
     """Subs where comments from this account are more likely to stay up."""
     names = candidate_subreddits(karma, age_days, extra=extra)
     # Prefer a mix: one newbie-friendly, then the account's usual browse list.
-    extra_clean = [s.strip().lstrip("r/") for s in (extra or []) if s and str(s).strip()]
+    extra_clean = [clean_subreddit_name(s) for s in (extra or []) if s and str(s).strip()]
     mixed: List[str] = []
     seen = set()
     for name in names[:4] + extra_clean + names[4:]:
@@ -231,7 +233,7 @@ def summarize_subreddit(about: Dict[str, Any], rules_payload: Any) -> Dict[str, 
     subscribers = int(data.get("subscribers") or 0)
     rules = _rules_text(rules_payload)
     return {
-        "name": str(data.get("display_name") or data.get("display_name_prefixed") or "").lstrip("r/"),
+        "name": clean_subreddit_name(data.get("display_name") or data.get("display_name_prefixed") or ""),
         "description": description.strip(),
         "rules": rules.strip(),
         "submission_type": submission_type,

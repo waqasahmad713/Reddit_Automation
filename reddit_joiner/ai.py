@@ -191,12 +191,50 @@ _QUESTION_PATTERNS = (
     r"\bwhat (?:is|are|was|were|if|about)\b",
     r"\bwhere (?:can|do|should|is)\b",
 )
+_EXPERIENCE_PATTERNS = (
+    r"\bi (?:finally|just|recently)\b",
+    r"\bmy first\b",
+    r"\bstory time\b",
+    r"\btoday i\b",
+)
+_MILESTONE_PATTERNS = (
+    r"\bi did it\b",
+    r"\bfinally (?:passed|finished|got|made|hit)\b",
+    r"\bday \d+\b",
+    r"\bproud of\b",
+    r"\bjust (?:finished|completed|hit|passed)\b",
+)
+_DISCUSSION_PATTERNS = (
+    r"\bunpopular opinion\b",
+    r"\blet'?s talk about\b",
+    r"\bwhat'?s your favou?rite\b",
+    r"\bdoes anybody else\b",
+)
+_TIP_PATTERNS = (
+    r"\bpsa\b",
+    r"\btil\b",
+    r"\bpro tip\b",
+    r"\blesson learned\b",
+    r"\bwhat worked for me\b",
+)
 
-COMMENTABLE_INTENTS = frozenset({"help", "suggestion", "review", "question"})
+COMMENTABLE_INTENTS = frozenset(
+    {
+        "help",
+        "suggestion",
+        "review",
+        "question",
+        "experience",
+        "milestone",
+        "discussion",
+        "tip",
+    }
+)
 
 
 def classify_post_intent(title: str, body: str = "") -> str:
-    """Soft label: help | suggestion | review | question | other."""
+    """Soft label: help | suggestion | review | question | experience |
+    milestone | discussion | tip | other."""
     title_l = (title or "").lower()
     blob = f"{title_l}\n{(body or '')[:500]}".lower()
     scores = {
@@ -204,6 +242,10 @@ def classify_post_intent(title: str, body: str = "") -> str:
         "suggestion": sum(1 for pat in _SUGGEST_PATTERNS if re.search(pat, blob)),
         "review": sum(1 for pat in _REVIEW_PATTERNS if re.search(pat, blob)),
         "question": sum(1 for pat in _QUESTION_PATTERNS if re.search(pat, blob)),
+        "experience": sum(1 for pat in _EXPERIENCE_PATTERNS if re.search(pat, blob)),
+        "milestone": sum(1 for pat in _MILESTONE_PATTERNS if re.search(pat, blob)),
+        "discussion": sum(1 for pat in _DISCUSSION_PATTERNS if re.search(pat, blob)),
+        "tip": sum(1 for pat in _TIP_PATTERNS if re.search(pat, blob)),
     }
     if "?" in (title or ""):
         scores["question"] += 1
@@ -1103,7 +1145,7 @@ def generate_ai_comment(
     intent = str(info.get("intent") or classify_post_intent(title, body))
     if not is_commentable_intent(intent):
         raise RuntimeError(
-            "post is not help, suggestion, review, or question"
+            "post is not a commentable text post (help, question, story, tip...)"
         )
     place = f"r/{subreddit.strip()}" if (subreddit or "").strip() else "this Reddit community"
     picked = comment_strategy(tone)
@@ -1173,6 +1215,20 @@ def generate_ai_comment(
         ),
         "question": (
             "Answer their actual question in plain words."
+        ),
+        "experience": (
+            "They are sharing a personal story. React to one specific moment in it."
+        ),
+        "milestone": (
+            "They are sharing an achievement. Congratulate the specific thing they did, "
+            "not success in general."
+        ),
+        "discussion": (
+            "They started a discussion. Give one short, friendly take of your own on the topic."
+        ),
+        "tip": (
+            "They shared a tip or something they learned. Say why it is useful, "
+            "or add one small related tip."
         ),
     }.get(intent, "Reply to what they actually said.")
     rule_blob = re.sub(r"\s+", " ", (rules or "").strip())[:900]
@@ -1290,7 +1346,9 @@ def generate_ai_post(
     Return (title, body, provider) for a genuine text post that fits the subreddit.
     Uses recent discussion so the draft continues what people are talking about now.
     """
-    name = (subreddit or "").strip().lstrip("r/")
+    from reddit_joiner.sheets import clean_subreddit_name
+
+    name = clean_subreddit_name(subreddit)
     recent = [re.sub(r"\s+", " ", str(item or "")).strip() for item in (topics or [])]
     recent = [item for item in recent if 8 <= len(item) <= 280][:8]
     topic_block = "\n".join(f"- {item}" for item in recent) or "- (none listed)"

@@ -25,9 +25,9 @@ FOLLOW_TOTAL_RANGE = (12, 20)
 FOLLOW_SHARED_CAP = 2
 ACTION_WATCHDOG_SECONDS = 180
 HUNG_START_SECONDS = 180
-COMMENT_POST_AGE_MIN = 10 * 60
-COMMENT_POST_AGE_MAX = 90 * 60
-COMMENT_THREAD_REPLIES = (1, 2)
+COMMENT_POST_AGE_MIN = 5 * 60
+COMMENT_POST_AGE_MAX = 6 * 60 * 60
+COMMENT_THREAD_REPLIES = (0, 8)
 FEED_SORT_WEIGHTS = (
     ("best", 35),
     ("hot", 30),
@@ -90,7 +90,9 @@ def may_join(age: float, subreddit: str = "") -> Tuple[bool, str]:
             False,
             f"no joins until day {JOIN_MIN_AGE_DAYS} (account is {value:.0f}d)",
         )
-    name = (subreddit or "").strip().lstrip("r/").lower()
+    from reddit_joiner.sheets import clean_subreddit_name
+
+    name = clean_subreddit_name(subreddit).lower()
     if name in ASK_JOIN_NAMES or name.startswith("ask"):
         if value < float(ASK_JOIN_MIN_AGE_DAYS):
             return (
@@ -191,7 +193,14 @@ def comment_thread_ok(num_comments: int, created_age_seconds: Optional[float]) -
         return True, ""
     age = float(created_age_seconds)
     if age < float(COMMENT_POST_AGE_MIN):
-        return False, "post is newer than 10 min"
+        return False, f"post is newer than {_age_label(COMMENT_POST_AGE_MIN)}"
     if age > float(COMMENT_POST_AGE_MAX):
-        return False, "post is older than 90 min"
+        return False, f"post is older than {_age_label(COMMENT_POST_AGE_MAX)}"
     return True, ""
+
+
+def _age_label(seconds: float) -> str:
+    minutes = float(seconds) / 60.0
+    if minutes >= 120 and minutes % 60 == 0:
+        return f"{minutes / 60:.0f} h"
+    return f"{minutes:.0f} min"

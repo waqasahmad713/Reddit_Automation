@@ -92,7 +92,9 @@ def empty_rules(subreddit: str, source: str = "") -> SubredditRules:
 
 
 def _clean_name(name: str) -> str:
-    return str(name or "").strip().lstrip("r/").split("/")[0]
+    from reddit_joiner.sheets import clean_subreddit_name
+
+    return clean_subreddit_name(name)
 
 
 def _classify(text: str) -> Dict[str, bool]:

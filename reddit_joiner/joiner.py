@@ -106,17 +106,30 @@ except ImportError:
 from reddit_joiner.sheets import (  # noqa: E402
     ACCOUNTS_SHEET,
     ACCOUNTS_SHEET_FIELDS,
+    GENERAL_ACCOUNTS_SHEET,
     SUBREDDITS_SHEET,
     SUBREDDITS_SHEET_FIELDS,
+    TARGETED_RELATED_SHEET,
+    account_group,
+    accounts_sheet_path,
+    append_target_related,
     apply_dead_status_to_accounts_sheet,
+    clean_subreddit_name,
     disable_account_in_sheet,
     ensure_accounts_sheet,
     ensure_subreddits_sheet,
+    ensure_targeted_related_sheet,
+    is_targeted_mode,
     load_account_ids_from_sheet,
     load_browse_subreddits,
     load_outside_lookup_reports,
     load_profile_ids,
+    load_target_groups,
+    load_target_related,
     persist_inside_ban,
+    set_sheet_mode,
+    subreddits_sheet_path,
+    target_related_known,
 )
 
 PROFILES_FILE = str(_PROFILES_FILE)
@@ -158,6 +171,7 @@ _JOIN_ARRIVE_LABELS = {
     "suggestions": "search suggestions",
     "related": "related communities",
     "listing": "Popular / All / Rising",
+    "saved": "targeted_related.csv",
 }
 
 ACTIVITY_ON_HOMEPAGE = 12  # unused; home time comes from HOME_ACTIVITY_SHARE
@@ -186,7 +200,16 @@ COMMENTS_PER_SUBREDDIT = (1, 1)  # one general comment per community when budget
 COMMENT_LISTING_SORTS = ("new",)
 # A general comment is only written when the analysed post is one of these.
 # Anything else ("other") is read and left alone.
-COMMENTABLE_POST_INTENTS = {"help", "suggestion", "review", "question"}
+COMMENTABLE_POST_INTENTS = {
+    "help",
+    "suggestion",
+    "review",
+    "question",
+    "experience",
+    "milestone",
+    "discussion",
+    "tip",
+}
 
 # Searching from Home, then reading the results on the "New" tab. Counts as Home
 # time, since the search bar and the results page both live outside a community.
@@ -290,7 +313,7 @@ COMMENT_MAX_PER_WEEK = COMMENTS_PER_WINDOW
 SHEET_COMMENTS_PER_RUN = 1  # comments.csv uses the same daily comment budget
 COMMENT_EDIT_WAIT = (180, 240)  # after a comments.csv comment, wait 3–4 min then edit
 COMMENTS_PER_RUN = 1
-SESSION_GENERAL_COMMENTS = (0, 1)  # some sittings skip the general comment
+SESSION_GENERAL_COMMENTS = (1, 1)  # every day-8+ sitting tries; the 24h cap still applies
 SESSION_COMMENT_CAP = 1
 GENERAL_COMMENT_SUBS_PER_RUN = 4
 GENERAL_COMMENT_OPENS_PER_SUB = 3
@@ -2021,6 +2044,173 @@ def discover_explore_subreddits(
     return keep, how
 
 
+TARGET_RELATED_MIN_SUBSCRIBERS = 1000
+TARGET_RELATED_VET_PER_SITTING = 6
+
+
+def _target_search_key(target: Dict[str, Any]) -> str:
+    words = [str(target.get("group") or "")] + list(target.get("targets") or [])
+    words = [item for item in words if item]
+    if not words:
+        return ""
+    raw = _rng().choice(words)
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw).replace("_", " ")
+    return re.sub(r"\s+", " ", spaced).strip().lower()
+
+
+def _vet_target_related(driver: WebDriver, label: str, name: str) -> str:
+    """Empty string when a related community is fine to use; otherwise why not."""
+    try:
+        about = _about_join_state(driver, label, name)
+    except Exception:
+        about = {}
+    if not about:
+        return "about.json unreadable"
+    if about.get("over18"):
+        return "NSFW"
+    if about.get("quarantine"):
+        return "quarantined"
+    if about.get("restricted"):
+        return str(about.get("kind") or "restricted")
+    if int(about.get("subscribers") or 0) < TARGET_RELATED_MIN_SUBSCRIBERS:
+        return f"under {TARGET_RELATED_MIN_SUBSCRIBERS} members"
+    return ""
+
+
+def discover_target_related(
+    driver: WebDriver,
+    label: str,
+    target: Dict[str, Any],
+    avoid: Optional[Iterable[str]] = None,
+    want: int = 2,
+    seen: Optional[Iterable[str]] = None,
+    user_id: str = "",
+) -> Tuple[List[str], Dict[str, str]]:
+    """Targeted run: explore only communities related to this account's targets.
+
+    Live sources are the related list on a target page and a community search
+    for the group or target name. New names are vetted (not NSFW, quarantined,
+    private, or tiny) and added to targeted_related.csv. Saved related names
+    from earlier sittings fill the rest.
+    """
+    need = max(0, int(want))
+    if need <= 0:
+        return [], {}
+    group = str(target.get("group") or "")
+    targets = list(target.get("targets") or [])
+    target_keys = {name.lower() for name in targets}
+    hard = {normalize_subreddit(str(item or "")).lower() for item in (avoid or [])}
+    hard.update(_SKIP_EXPLORE_SUBS)
+    hard.update(target_keys)
+    hard.discard("")
+    soft = {normalize_subreddit(str(item or "")).lower() for item in (seen or [])}
+    soft.discard("")
+    known = target_related_known(group)
+    found: List[str] = []
+    how: Dict[str, str] = {}
+    vetted = [0]
+
+    def _take(name: str, source: str, found_from: str) -> bool:
+        clean = _usable_explore_name(name, hard | soft)
+        if not clean or len(found) >= need:
+            return False
+        key = clean.lower()
+        if key not in known:
+            if vetted[0] >= TARGET_RELATED_VET_PER_SITTING:
+                return False
+            vetted[0] += 1
+            why = _vet_target_related(driver, label, clean)
+            if why:
+                hard.add(key)
+                log(f"[Profile {label}] Related r/{clean} skipped — {why}")
+                return False
+            if append_target_related(group, clean, found_from):
+                known.add(key)
+                log(
+                    f"[Profile {label}] Added r/{clean} to {os.path.basename(TARGETED_RELATED_SHEET)} "
+                    f"({found_from})"
+                )
+        elif key not in {item.lower() for item in load_target_related(group)}:
+            hard.add(key)
+            return False
+        if not reserve_subreddits(user_id, [clean], explore=True):
+            hard.add(key)
+            return False
+        found.append(clean)
+        hard.add(key)
+        how[key] = source
+        return True
+
+    def _from_target_page() -> None:
+        free = [name for name in targets if not subreddit_taken_by_other(user_id, name)]
+        if not free:
+            return
+        name = _rng().choice(free)
+        try:
+            if not open_exclusive_community(
+                driver, label, user_id, name, community_entry_url(name), wait=0.0
+            ):
+                return
+            time.sleep(_rng().uniform(2.0, 4.5))
+            dismiss_popups(driver)
+            raw = driver.execute_script(_RELATED_SUB_JS) or []
+        except Exception as exc:
+            log(f"[Profile {label}] Related list on r/{name} skipped ({brief_error(exc)})")
+            return
+        names = [str(item) for item in raw]
+        _rng().shuffle(names)
+        log(f"[Profile {label}] Read the related communities on r/{name}")
+        for item in names:
+            if _take(item, "related", f"related on r/{name}"):
+                log(f"[Profile {label}] Related list on r/{name} showed r/{item} — will visit it")
+        try:
+            return_to_reddit_home(driver, label, reason="after reading related communities")
+        except Exception:
+            pass
+        release_all_held_subreddits(user_id)
+
+    def _from_search() -> None:
+        if not account_may_search(user_id):
+            return
+        key = _target_search_key(target)
+        if not key:
+            return
+        url = "https://www.reddit.com/search/?q=" + quote_plus(key) + "&type=communities"
+        try:
+            navigate(driver, url, label)
+            time.sleep(_rng().uniform(1.8, 3.4))
+            dismiss_popups(driver)
+        except Exception as exc:
+            log(f"[Profile {label}] Community search for \"{key}\" skipped ({brief_error(exc)})")
+            return
+        names = collect_feed_subreddits(driver)
+        log(f"[Profile {label}] Searched communities for \"{key}\"")
+        for item in names:
+            if _take(item, "search", f"search \"{key}\""):
+                log(f"[Profile {label}] Search for \"{key}\" found r/{item} — will visit it")
+
+    def _from_saved() -> None:
+        names = list(target.get("related") or [])
+        _rng().shuffle(names)
+        for item in names:
+            if _take(item, "saved", "saved"):
+                log(f"[Profile {label}] r/{item} from {os.path.basename(TARGETED_RELATED_SHEET)}")
+
+    live = [_from_target_page, _from_search]
+    _rng().shuffle(live)
+    saved_first = bool(target.get("related")) and _rng().random() < 0.5
+    order = ([_from_saved] + live) if saved_first else (live + [_from_saved])
+    log(
+        f"[Profile {label}] Finding {need} related communit{'y' if need == 1 else 'ies'} "
+        f"for target group {group or '(all targets)'}"
+    )
+    for step in order:
+        if len(found) >= need or stop_requested():
+            break
+        step()
+    return found[:need], {name.lower(): how.get(name.lower(), "related") for name in found[:need]}
+
+
 # After clicking Open, AdsPower assigns then refreshes the proxy IP.
 # Do not attach Selenium or open Reddit until that finishes.
 PROXY_ASSIGN_WAIT = (8.0, 12.0)
@@ -2176,6 +2366,7 @@ class AccountSummary:
     scroll_engine: str = ""
     explored: List[str] = field(default_factory=list)
     explore_how: Dict[str, str] = field(default_factory=dict)
+    target_group: str = ""
     join_arrive_ways: List[str] = field(default_factory=list)
     sitting_ok: bool = True
     session_started_at: float = 0.0
@@ -2234,6 +2425,8 @@ class AccountSummary:
         karma = int(self.account_karma or 0)
         age = f"{self.account_age_days:.0f}d" if self.account_age_days else "?d"
         parts = [who, f"karma {karma}", age]
+        if self.target_group:
+            parts.append(f"target: {self.target_group}")
         if self.is_warmup_browse():
             parts.append(warmup_ladder.day_band_label(self.account_age_days))
         else:
@@ -2372,12 +2565,17 @@ class AccountSummary:
         log(self.one_line())
 
 
+def _summary_prefix() -> str:
+    return "targeted_session_" if is_targeted_mode() else "session_"
+
+
 def next_session_number() -> int:
     folder = _SUMMARIES_DIR
     folder.mkdir(parents=True, exist_ok=True)
+    prefix = _summary_prefix()
     highest = 0
-    for path in folder.glob("session_*.txt"):
-        match = re.match(r"session_(\d+)\.txt$", path.name, re.I)
+    for path in folder.glob(f"{prefix}*.txt"):
+        match = re.match(re.escape(prefix) + r"(\d+)\.txt$", path.name, re.I)
         if match:
             highest = max(highest, int(match.group(1)))
     return highest + 1
@@ -2486,10 +2684,10 @@ def write_session_summary(reports: List[AccountSummary]) -> str:
     number = next_session_number()
     folder = _SUMMARIES_DIR
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"session_{number}.txt"
+    path = folder / f"{_summary_prefix()}{number}.txt"
     when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
-        f"SESSION {number}",
+        f"{'TARGETED SESSION' if is_targeted_mode() else 'SESSION'} {number}",
         f"Date     : {when}",
         "",
         *session_tally_lines(reports),
@@ -2498,7 +2696,7 @@ def write_session_summary(reports: List[AccountSummary]) -> str:
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
-    latest = folder / "latest.txt"
+    latest = folder / ("targeted_latest.txt" if is_targeted_mode() else "latest.txt")
     latest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     return str(path)
 
@@ -3271,7 +3469,7 @@ def remember_explored_subreddits(user_id: str, subs: List[str]) -> None:
 
 
 def remember_session_subreddits(user_id: str, subs: List[str]) -> None:
-    names = [str(name).strip().lstrip("r/") for name in subs if str(name).strip()]
+    names = [clean_subreddit_name(name) for name in subs if str(name).strip()]
     if not user_id or not names:
         return
     with _FILE_LOCK:
@@ -3392,8 +3590,61 @@ def is_blocked_subreddit(name: str) -> bool:
     return key in BLOCKED_SUBREDDITS or key in join_blocked_subreddits()
 
 
+def _subs_sheet_name() -> str:
+    return os.path.basename(subreddits_sheet_path())
+
+
+def set_session_target(user_id: str, label: str = "") -> Optional[Dict[str, Any]]:
+    """Targeted run only: this sitting's group, its targets and its enabled related subs."""
+    _tls.target = None
+    if not is_targeted_mode():
+        return None
+    group = account_group(user_id)
+    targets = load_browse_subreddits(group)
+    if group and not targets:
+        log(
+            f"[Profile {label}] Target group '{group}' has no enabled rows in "
+            f"{os.path.basename(subreddits_sheet_path())} — using every target"
+        )
+        group = ""
+        targets = load_browse_subreddits()
+    related = [
+        name
+        for name in load_target_related(group)
+        if name.lower() not in {item.lower() for item in targets}
+    ]
+    _tls.target = {"group": group, "targets": targets, "related": related}
+    log(
+        f"[Profile {label}] Targeted warm-up — group {group or '(all targets)'}: "
+        + ", ".join("r/" + name for name in targets)
+        + (f" | related: {', '.join('r/' + name for name in related)}" if related else "")
+    )
+    return _tls.target
+
+
+def session_target() -> Optional[Dict[str, Any]]:
+    return getattr(_tls, "target", None)
+
+
+def clear_session_target() -> None:
+    _tls.target = None
+
+
 def allowed_subreddits() -> List[str]:
-    """Communities from subreddits.csv only (enabled=yes), minus the blocklist."""
+    """Communities from the active subreddit sheet (enabled=yes), minus the blocklist.
+
+    In a targeted sitting: that account's targets plus their enabled related subs.
+    """
+    target = session_target()
+    if target:
+        names: List[str] = []
+        seen = set()
+        for name in list(target.get("targets") or []) + list(target.get("related") or []):
+            if name.lower() in seen or is_blocked_subreddit(name):
+                continue
+            seen.add(name.lower())
+            names.append(name)
+        return names
     return [
         name for name in load_browse_subreddits() if not is_blocked_subreddit(name)
     ]
@@ -3404,11 +3655,14 @@ def pick_session_subreddits(
     karma: int = 0,
     age_days: float = 0.0,
 ) -> List[str]:
-    """Pick this sitting's general-activity communities from subreddits.csv."""
+    """Pick this sitting's general-activity communities from the active subreddit sheet."""
+    target = session_target()
+    source = list(target.get("targets") or []) if target else allowed_subreddits()
+    related = list(target.get("related") or []) if target else []
     sheet: List[str] = []
     seen = set()
-    for raw in allowed_subreddits():
-        name = str(raw or "").strip().lstrip("r/")
+    for raw in source:
+        name = clean_subreddit_name(raw)
         key = name.lower()
         if not name or key in seen or is_blocked_subreddit(name):
             continue
@@ -3428,7 +3682,14 @@ def pick_session_subreddits(
         rng = _rng()
         return sorted(names, key=lambda name: (run_subreddit_uses(name), rng.random()))
 
-    free = [name for name in sheet if not subreddit_taken_by_other(user_id, name)] or list(sheet)
+    free = [name for name in sheet if not subreddit_taken_by_other(user_id, name)]
+    if not free and related:
+        free = [
+            name
+            for name in related
+            if not is_blocked_subreddit(name) and not subreddit_taken_by_other(user_id, name)
+        ]
+    free = free or list(sheet)
     recent = recent_session_subreddits(user_id, SUBREDDIT_ROTATION_RUNS)
     count = min(_rng().randint(*SUBREDDITS_PER_SESSION), len(free))
     fresh = [name for name in free if name.lower() not in recent]
@@ -6351,6 +6612,8 @@ def _about_join_state(driver: WebDriver, label: str, subreddit: str) -> Dict[str
         "quarantine": bool(data.get("quarantine")),
         "restricted": kind in {"private", "restricted", "gold_restricted", "archived"},
         "removed": kind in {"user", ""} and not data.get("display_name"),
+        "over18": bool(data.get("over18")),
+        "subscribers": int(data.get("subscribers") or 0),
     }
 
 
@@ -7128,7 +7391,8 @@ def pick_listing_post(
     user_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
-    Prefer a help, question, suggestion, or review post on /new.
+    Prefer a help, question, suggestion, or review post on /new; stories,
+    milestones, discussions, and tips are also candidates.
     Image, video, and gallery posts are not candidates.
     Any other kind of post is left alone.
     """
@@ -7267,7 +7531,7 @@ def leave_subreddit_comments(
         return 0
     sheet = {item.lower() for item in allowed_subreddits()}
     if name.lower() not in sheet:
-        log(f"{prefix}No general comments in r/{name} — general activity comments stay on subreddits.csv")
+        log(f"{prefix}No general comments in r/{name} — general activity comments stay on {_subs_sheet_name()}")
         return 0
     planned = list(sorts or next_comment_sorts(stats, want))[:want]
     posted = 0
@@ -7315,7 +7579,7 @@ def leave_subreddit_comments(
             picked = pick_listing_post(posts, user_id)
             if picked is None:
                 log(
-                    f"{prefix}No help, question, suggestion, or review post left in r/{name} "
+                    f"{prefix}No commentable text post left (help, question, story, tip...) in r/{name} "
                     "(image and video posts are skipped)"
                 )
                 continue
@@ -12854,7 +13118,7 @@ def maybe_general_community_post(
     if name.lower() not in sheet_names:
         log(
             f"[Profile {label}] No general post in r/{name} — "
-            "general posts stay on subreddits.csv"
+            f"general posts stay on {_subs_sheet_name()}"
         )
         return False
     if _sheet_post_communities(user_id, label, serial):
@@ -13129,7 +13393,7 @@ def maybe_karma_growth_comments(
     _rng().shuffle(extras)
     subs = (prefer + extras)[:GENERAL_COMMENT_SUBS_PER_RUN]
     if not subs:
-        stats.karma_comment_note = "no communities in subreddits.csv"
+        stats.karma_comment_note = f"no communities in {_subs_sheet_name()}"
         log(f"[Profile {label}] Skipping extra general comments — {stats.karma_comment_note}")
         return
     log(
@@ -14007,7 +14271,7 @@ def maybe_do_session_post(
         ordered = [name for name in ordered if name.lower() in live_set]
     if not ordered:
         stats.post_status = "skipped"
-        stats.post_note = "no subreddits.csv community for a general post"
+        stats.post_note = f"no {_subs_sheet_name()} community for a general post"
         log(f"[Profile {label}] {stats.post_note}")
         return
     last_why = ""
@@ -14030,7 +14294,7 @@ def maybe_do_session_post(
             last_why = stats.post_note
     if not (done and done[0]):
         stats.post_status = stats.post_status if stats.post_status != "none" else "skipped"
-        stats.post_note = last_why or "no subreddits.csv community accepted a general post"
+        stats.post_note = last_why or f"no {_subs_sheet_name()} community accepted a general post"
         log(f"[Profile {label}] General post skipped — {stats.post_note}")
 
 
@@ -14150,6 +14414,10 @@ def process_profile(
     try:
         begin_session_rng(user_id, label)
         _tls.batch_user_id = user_id
+        stats.target_group = ""
+        target = set_session_target(user_id, label)
+        if target:
+            stats.target_group = str(target.get("group") or "") or "all targets"
         open_deadline = time.time() + float(warmup_ladder.HUNG_START_SECONDS)
         try:
             data = start_profile(
@@ -14308,7 +14576,9 @@ def process_profile(
         ]
         if young_band == "days_1_3":
             _rng().shuffle(browse_list)
-            if not browse_list or _rng().random() < 0.35:
+            if session_target() and browse_list:
+                browse_list = browse_list[:1]
+            elif not browse_list or _rng().random() < 0.35:
                 browse_list = []
             else:
                 browse_list = browse_list[:1]
@@ -14383,7 +14653,7 @@ def process_profile(
         elif post_room > 0:
             log(
                 f"[Profile {label}] posts.csv is empty — after rules and recent posts, "
-                "one general post in a subreddits.csv community"
+                f"one general post in a {_subs_sheet_name()} community"
             )
         else:
             log(
@@ -14395,12 +14665,12 @@ def process_profile(
             log(
                 f"[Profile {label}] Exploration — "
                 f"{want_explore} extra communit{'y' if want_explore == 1 else 'ies'}, "
-                f"{len(browse_list)} from subreddits.csv"
+                f"{len(browse_list)} from {_subs_sheet_name()}"
             )
         else:
             log(
                 f"[Profile {label}] No random explore this sitting — "
-                f"{len(browse_list)} from subreddits.csv"
+                f"{len(browse_list)} from {_subs_sheet_name()}"
             )
         home_first, home_between = plan_home_budget(
             style.session_seconds,
@@ -14460,19 +14730,31 @@ def process_profile(
                     + ", ".join("r/" + name for name in sorted(cooldown))
                 )
             avoid_explore = set(browse_list)
-            avoid_explore.update(allowed_subreddits())
             avoid_explore.update(stats.joined)
             avoid_explore.update(stats.already_member)
-            explore, explore_how = discover_explore_subreddits(
-                driver,
-                label,
-                avoid=avoid_explore,
-                want=want_explore,
-                karma=stats.account_karma,
-                age_days=stats.account_age_days,
-                seen=cooldown,
-                user_id=user_id,
-            )
+            target = session_target()
+            if target:
+                explore, explore_how = discover_target_related(
+                    driver,
+                    label,
+                    target,
+                    avoid=avoid_explore,
+                    want=want_explore,
+                    seen=cooldown,
+                    user_id=user_id,
+                )
+            else:
+                avoid_explore.update(allowed_subreddits())
+                explore, explore_how = discover_explore_subreddits(
+                    driver,
+                    label,
+                    avoid=avoid_explore,
+                    want=want_explore,
+                    karma=stats.account_karma,
+                    age_days=stats.account_age_days,
+                    seen=cooldown,
+                    user_id=user_id,
+                )
             if explore:
                 remember_explored_subreddits(user_id, explore)
                 stats.explored = list(explore)
@@ -14687,7 +14969,11 @@ def process_profile(
                 hop_allowance = max(
                     MIN_SUBREDDIT_DWELL, spare / float(taste_hops_left + 1)
                 )
-            origin = "from subreddits.csv" if is_sheet else "random explore"
+            origin = (
+                f"from {_subs_sheet_name()}"
+                if is_sheet
+                else ("related explore" if session_target() else "random explore")
+            )
             log(
                 f"[Profile {label}] {'Sheet' if is_sheet else 'Exploring'} r/{subreddit} "
                 f"({index}/{len(hops)}) {origin}, ~{hop_allowance:.0f}s allowance"
@@ -15035,7 +15321,7 @@ def process_profile(
                         log(
                             f"[Profile {label}] {style.post_fraction:.0%} through the "
                             f"{style.session_seconds / 60:.0f} min sitting — general post "
-                            "waits for a subreddits.csv community"
+                            f"waits for a {_subs_sheet_name()} community"
                         )
             except Exception as exc:
                 community_seconds += time.time() - sub_started
@@ -15159,7 +15445,7 @@ def process_profile(
                     user_id,
                     stats,
                     session_subs=browse_list or allowed_subreddits(),
-                    time_budget=max(45.0, community_budget - community_seconds),
+                    time_budget=max(150.0, community_budget - community_seconds),
                 )
     except Exception as exc:
         log(f"[Profile {label}] FAILED — {brief_error(exc)}")
@@ -15180,6 +15466,7 @@ def process_profile(
         if stats.session_started_at:
             stats.sitting_seconds = max(0.0, time.time() - stats.session_started_at)
         set_current_style(None)
+        clear_session_target()
         end_session_rng()
         close_browser(driver, user_id, label)
         agent = _rl_agent()
@@ -15441,13 +15728,59 @@ def open_report_in_browser(path: str) -> bool:
     return opened
 
 
-def main() -> int:
+def parse_run_args(argv: Optional[Sequence[str]] = None) -> Any:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="reddit_joiner",
+        description="Warm up AdsPower Reddit accounts.",
+    )
+    parser.add_argument(
+        "--targeted",
+        action="store_true",
+        help=(
+            "targeted warm-up: read targeted_accounts.csv and targeted_subreddits.csv "
+            "instead of accounts.csv and subreddits.csv"
+        ),
+    )
+    return parser.parse_args(list(argv) if argv is not None else sys.argv[1:])
+
+
+def _warn_accounts_in_both_runs() -> None:
+    try:
+        from reddit_joiner.sheets import _read_simple_csv, _csv_lookup
+
+        _, rows = _read_simple_csv(GENERAL_ACCOUNTS_SHEET, list(ACCOUNTS_SHEET_FIELDS))
+    except Exception:
+        return
+    general = {
+        _csv_lookup(row, "user_id", "account", "profile", "ads_power", "id").lower()
+        for row in rows
+    }
+    both = [item for item in PROFILE_IDS if item.lower() in general]
+    if both:
+        log(
+            f"Warning: {len(both)} account(s) are in both accounts.csv and "
+            f"{os.path.basename(accounts_sheet_path())}: {', '.join(both)}. "
+            "Do not run both warm-ups at the same time — they would open the same AdsPower profile."
+        )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
     global PROFILE_IDS, SUBREDDITS, SUBREDDITS_TO_BROWSE
+    args = parse_run_args(argv)
+    set_sheet_mode("targeted" if args.targeted else "general")
     install_stop_handlers()
     run_started_at = time.time()
     run_log = start_run_log()
     if run_log:
         log(f"Run log: {run_log} (proxy logins and passwords redacted)")
+    log(
+        "Mode: targeted warm-up "
+        f"({os.path.basename(accounts_sheet_path())} + {os.path.basename(subreddits_sheet_path())})"
+        if is_targeted_mode()
+        else "Mode: general warm-up (accounts.csv + subreddits.csv)"
+    )
     disk_error = require_disk_space()
     if disk_error:
         log(disk_error)
@@ -15469,32 +15802,46 @@ def main() -> int:
             log(f"Outside lookup: stored status for {imported} account(s)")
         disabled = apply_dead_status_to_accounts_sheet()
         if disabled:
-            log(f"Outside lookup: disabled {disabled} banned/suspended row(s) in accounts.csv")
+            log(
+                f"Outside lookup: disabled {disabled} banned/suspended row(s) in "
+                f"{os.path.basename(accounts_sheet_path())}"
+            )
     except Exception as exc:
         log(f"Could not load outside lookup ({brief_error(exc)})")
+    accounts_name = os.path.basename(accounts_sheet_path())
+    subs_name = os.path.basename(subreddits_sheet_path())
     PROFILE_IDS = load_profile_ids()
     sheet_subs = load_browse_subreddits()
     SUBREDDITS = sheet_subs
     SUBREDDITS_TO_BROWSE = sheet_subs
     if not PROFILE_IDS:
-        log("No accounts — add AdsPower user_ids in accounts.csv (enabled=yes)")
+        log(f"No accounts — add AdsPower user_ids in {accounts_name} (enabled=yes)")
         return 1
     if not SUBREDDITS:
-        log("No subreddits — add community names in subreddits.csv (enabled=yes)")
+        log(f"No subreddits — add community names in {subs_name} (enabled=yes)")
         return 1
+    if is_targeted_mode():
+        ensure_targeted_related_sheet()
+        groups = load_target_groups()
+        for group, names in sorted(groups.items()):
+            related = load_target_related(group)
+            log(
+                f"Target group {group or '(no group)'}: "
+                + ", ".join("r/" + name for name in names)
+                + (f" | {len(related)} related" if related else "")
+            )
+        _warn_accounts_in_both_runs()
 
     log(f"AdsPower API: {ADSPOWER_API}")
+    log(f"Only these accounts ({accounts_name}): {', '.join(PROFILE_IDS)}")
     log(
-        f"Only these accounts ({os.path.basename(ACCOUNTS_SHEET)}): {', '.join(PROFILE_IDS)}"
-    )
-    log(
-        f"Only these communities ({os.path.basename(SUBREDDITS_SHEET)}): "
+        f"Only these communities ({subs_name}): "
         + ", ".join("r/" + name for name in SUBREDDITS)
     )
     log(
-        f"Profiles: {len(PROFILE_IDS)} from {os.path.basename(ACCOUNTS_SHEET)} "
+        f"Profiles: {len(PROFILE_IDS)} from {accounts_name} "
         f"({'all open together' if PARALLEL_PROFILES else 'one by one'}) | "
-        f"Browse extras: {len(SUBREDDITS)} from {os.path.basename(SUBREDDITS_SHEET)} | "
+        f"Browse extras: {len(SUBREDDITS)} from {subs_name} | "
         f"{SUBREDDITS_PER_SESSION[0]}–{SUBREDDITS_PER_SESSION[1]} general "
         f"(AskUK / NoStupidQuestions / Advice) + "
         f"{RANDOM_EXPLORE_PER_SESSION[0]}–{RANDOM_EXPLORE_PER_SESSION[1]} random explore "
@@ -15641,9 +15988,9 @@ def main() -> int:
         f"{GENERAL_COMMENT_MIN_AGE_DAYS}, {POSTS_PER_WINDOW} post from day "
         f"{warmup_ladder.POST_MIN_AGE_DAYS}. "
         "If comments.csv / posts.csv have unused rows, those go first; "
-        "if posts.csv is empty, one general post is written in a subreddits.csv "
+        f"if posts.csv is empty, one general post is written in a {_subs_sheet_name()} "
         "community after its rules and recent posts are read. "
-        "General comments stay on subreddits.csv. "
+        f"General comments stay on {_subs_sheet_name()}. "
         "Random explores are skipped for one sitting, then allowed again. "
         "RL picks comment tone and learns from the result."
     )

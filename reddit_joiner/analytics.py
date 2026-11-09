@@ -141,10 +141,10 @@ def chart_run_minutes(frames: Dict[str, pd.DataFrame], run_id: str, out: Path) -
     plt = _plt()
     fig, ax = plt.subplots(figsize=(max(6, len(run) * 0.7), 3.6))
     ax.bar(run["account"].astype(str), run["minutes"], color="#5a8f7b")
-    ax.axhline(6, color="#888", linestyle="--", linewidth=1)
-    ax.axhline(15, color="#888", linestyle="--", linewidth=1)
+    ax.axhline(7, color="#888", linestyle="--", linewidth=1)
+    ax.axhline(20, color="#888", linestyle="--", linewidth=1)
     ax.set_ylabel("minutes")
-    ax.set_title("This run — sitting length (6-15 min band)")
+    ax.set_title("This run — sitting length (7-20 min band)")
     ax.tick_params(axis="x", rotation=35, labelsize=8)
     _save(fig, out)
     return True

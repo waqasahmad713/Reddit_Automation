@@ -52,6 +52,32 @@ class StoreStatusTests(unittest.TestCase):
         self.assertEqual(kept, "BANNED")
         self.assertEqual(self.store.get_account_outside_status("k1hfmkv6"), "BANNED")
 
+    def test_outside_source_does_not_skip_before_open(self) -> None:
+        self.store.record_account_outside_status("k1out1", "BANNED", source="outside")
+        self.assertTrue(self.store.account_outside_status_is_dead("k1out1"))
+        self.assertFalse(self.store.account_inside_status_is_dead("k1out1"))
+        from reddit_joiner.joiner import account_is_dead, drop_dead_targets
+
+        self.assertFalse(account_is_dead("k1out1"))
+        kept = drop_dead_targets(
+            [{"user_id": "k1out1", "name": "out1"}],
+            why="test",
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["user_id"], "k1out1")
+
+    def test_inside_source_skips_before_open(self) -> None:
+        self.store.record_account_outside_status("k1in1", "BANNED", source="inside")
+        self.assertTrue(self.store.account_inside_status_is_dead("k1in1"))
+        from reddit_joiner.joiner import account_is_dead, drop_dead_targets
+
+        self.assertTrue(account_is_dead("k1in1"))
+        kept = drop_dead_targets(
+            [{"user_id": "k1in1", "name": "in1"}],
+            why="test",
+        )
+        self.assertEqual(kept, [])
+
 
 class CommentVisibleTests(unittest.TestCase):
     def test_unconfirmed_comments_are_unknown(self) -> None:
@@ -83,6 +109,37 @@ class CommentVisibleTests(unittest.TestCase):
         )
         self.assertEqual(stats.comments_visible(), 1)
         self.assertIn("comment 1 visible", stats.one_line())
+
+
+class ServerErrorStatusTests(unittest.TestCase):
+    def test_reason_is_ban_for_server_error(self) -> None:
+        from reddit_joiner.joiner import _popup_dead_reason, _reason_is_ban, _reason_is_server_error
+
+        self.assertTrue(_reason_is_server_error("we had a server error"))
+        self.assertTrue(_reason_is_server_error("server error"))
+        self.assertTrue(_reason_is_ban("we had a server error"))
+        self.assertFalse(_reason_is_server_error("the account is banned"))
+        self.assertEqual(
+            _popup_dead_reason("We had a server error. Try again later."),
+            "we had a server error",
+        )
+
+    def test_one_line_and_tally_show_server_error(self) -> None:
+        from reddit_joiner.joiner import AccountSummary, _analytics_status, session_tally_lines
+
+        stats = AccountSummary(
+            name="bob",
+            user_id="u1",
+            sitting_ok=True,
+            account_status="we had a server error",
+        )
+        self.assertTrue(stats.is_banned())
+        line = stats.one_line()
+        self.assertIn("we had a server error", line)
+        self.assertNotIn("| banned", line)
+        tally = "\n".join(session_tally_lines([stats]))
+        self.assertIn("Banned                    : 1", tally)
+        self.assertEqual(_analytics_status(stats), "server error")
 
 
 class SheetEnabledTests(unittest.TestCase):

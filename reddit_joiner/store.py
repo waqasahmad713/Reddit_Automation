@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import random
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -113,7 +114,7 @@ def init_db() -> None:
         _ensure_column(conn, "ai_comments", "status", "TEXT")
         _ensure_column(conn, "posts", "fingerprint", "TEXT")
         _ensure_column(conn, "posts", "attempt_number", "INTEGER")
-        conn.execute(
+        conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS account_outside_status (
                 user_id TEXT PRIMARY KEY,
@@ -121,12 +122,94 @@ def init_db() -> None:
                 source TEXT,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS account_unlocks (
+                user_id TEXT PRIMARY KEY,
+                join_day INTEGER NOT NULL,
+                upvote_day INTEGER NOT NULL,
+                comment_day INTEGER NOT NULL,
+                post_day INTEGER NOT NULL,
+                news_day INTEGER NOT NULL,
+                follow_day INTEGER NOT NULL
+            );
             """
         )
 
 
 DEAD_ACCOUNT_STATUSES = frozenset({"BANNED", "SUSPENDED"})
 _ID_TOKEN = re.compile(r"k1[a-z0-9]+", re.I)
+UNLOCK_RANGES = {
+    "join_day": (2, 5),
+    "upvote_day": (2, 2),
+    "comment_day": (2, 8),
+    "post_day": (8, 16),
+    "news_day": (1, 4),
+    "follow_day": (3, 8),
+}
+
+
+def _roll_unlocks(user_id: str) -> Dict[str, int]:
+    seed = int.from_bytes(
+        hashlib.sha256(f"unlocks:{user_id}".encode("utf-8")).digest()[:8],
+        "big",
+    )
+    rng = random.Random(seed)
+    return {name: rng.randint(lo, hi) for name, (lo, hi) in UNLOCK_RANGES.items()}
+
+
+def unlocks_for(user_id: str) -> Dict[str, int]:
+    """Stable per-account unlock days. Rolled once and saved."""
+    key = str(user_id or "").strip()
+    if not key:
+        return {name: hi for name, (_lo, hi) in UNLOCK_RANGES.items()}
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT join_day, upvote_day, comment_day, post_day, news_day, follow_day
+            FROM account_unlocks WHERE user_id = ?
+            """,
+            (key,),
+        ).fetchone()
+        if row:
+            data = {name: int(row[name]) for name in UNLOCK_RANGES}
+            join_day = max(2, int(data["join_day"]))
+            upvote_day = 2
+            comment_day = max(2, int(data["comment_day"]))
+            if (
+                join_day != data["join_day"]
+                or upvote_day != data["upvote_day"]
+                or comment_day != data["comment_day"]
+            ):
+                conn.execute(
+                    """
+                    UPDATE account_unlocks
+                    SET join_day = ?, upvote_day = ?, comment_day = ?
+                    WHERE user_id = ?
+                    """,
+                    (join_day, upvote_day, comment_day, key),
+                )
+                data["join_day"] = join_day
+                data["upvote_day"] = upvote_day
+                data["comment_day"] = comment_day
+            return data
+        rolled = _roll_unlocks(key)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO account_unlocks
+            (user_id, join_day, upvote_day, comment_day, post_day, news_day, follow_day)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key,
+                rolled["join_day"],
+                rolled["upvote_day"],
+                rolled["comment_day"],
+                rolled["post_day"],
+                rolled["news_day"],
+                rolled["follow_day"],
+            ),
+        )
+        return rolled
 
 
 def _norm_outside_status(status: str) -> str:
@@ -143,28 +226,47 @@ def _norm_outside_status(status: str) -> str:
     return ""
 
 
-def get_account_outside_status(user_id: str) -> str:
+def _account_status_row(user_id: str):
     key = str(user_id or "").strip()
     if not key:
-        return ""
+        return None
     init_db()
     with _connect() as conn:
         row = conn.execute(
-            "SELECT status FROM account_outside_status WHERE user_id = ?",
+            "SELECT status, source FROM account_outside_status WHERE user_id = ?",
             (key,),
         ).fetchone()
-    if not row:
-        row = None
-        with _connect() as conn:
-            row = conn.execute(
-                "SELECT status FROM account_outside_status WHERE lower(user_id) = ?",
-                (key.lower(),),
-            ).fetchone()
+    if row:
+        return row
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT status, source FROM account_outside_status WHERE lower(user_id) = ?",
+            (key.lower(),),
+        ).fetchone()
+
+
+def get_account_outside_status(user_id: str) -> str:
+    row = _account_status_row(user_id)
     return str(row["status"] or "").upper() if row else ""
+
+
+def get_account_outside_source(user_id: str) -> str:
+    row = _account_status_row(user_id)
+    return str(row["source"] or "").strip().lower() if row else ""
 
 
 def account_outside_status_is_dead(user_id: str) -> bool:
     return get_account_outside_status(user_id) in DEAD_ACCOUNT_STATUSES
+
+
+def account_inside_status_is_dead(user_id: str) -> bool:
+    """True only when this bot confirmed a ban in the AdsPower window."""
+    row = _account_status_row(user_id)
+    if not row:
+        return False
+    status = str(row["status"] or "").upper()
+    source = str(row["source"] or "").strip().lower()
+    return status in DEAD_ACCOUNT_STATUSES and source == "inside"
 
 
 def record_account_outside_status(

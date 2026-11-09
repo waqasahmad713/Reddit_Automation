@@ -6,13 +6,13 @@ One run handles every `enabled=yes` account in `sheets/accounts.csv`. Up to **4*
 
 ## What one account does
 
-Each sitting is **5–10 minutes**, mostly on Home, with short visits to communities.
+Each sitting is **5–10 minutes**, mostly on Home, with short visits to communities. Unlock days are per account, not a shared day-4 / day-8 / day-14 ladder.
 
 | Action | Limit |
 | --- | --- |
 | Comments | 2 per account per 48 hours |
 | Text post | 1 per account per 48 hours, and only when karma is **10 or more** |
-| Communities | 1–3 from `subreddits.csv`, plus a few random explores |
+| Communities | 1–10 from `subreddits.csv`, plus a few random explores |
 
 Comments go only on posts that read as **help, question, suggestion, or review**. Image, video, gallery, and GIF posts are skipped. If `comments.csv` has an unused link, that link is used first. If `posts.csv` has an unused row and karma is at least 10, that row is posted as written (title and body are not rewritten). Empty sheets fall back to a general comment or, when karma allows, one community post.
 
@@ -84,7 +84,7 @@ Ctrl+C still saves `data/rl_model.pkl` and `data/activity.db`.
 
 ## Targeted warm-up
 
-A separate run for accounts that should warm up inside chosen subreddits. It uses the same sitting as the general warm-up (Home stretches, 4 at a time, the day ladder, comment and post limits, comments.csv / posts.csv). The difference is where communities come from: only your targets and subreddits related to them.
+A separate run for accounts that should warm up inside chosen subreddits. It uses the same sitting as the general warm-up (Home stretches, 4 at a time, per-account unlock days, comment and post limits, comments.csv / posts.csv). The difference is where communities come from: only your targets and subreddits related to them.
 
 | Warm-up | Linux | Windows | Reads |
 | --- | --- | --- | --- |

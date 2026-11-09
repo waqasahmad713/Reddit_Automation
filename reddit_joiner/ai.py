@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import requests
@@ -370,11 +371,11 @@ _LEGACY_TONES = {
     "expert": "formatting",
     "funny": "witty",
 }
-# (max sentences, max characters). Formatting is checked by shape instead.
+# (max sentences, max characters). Formatting is two short plain lines.
 COMMENT_LIMITS = {
-    "formatting": (0, 450),
-    "validating": (4, 240),
-    "curious": (3, 220),
+    "formatting": (2, 240),
+    "validating": (3, 240),
+    "curious": (2, 220),
     "witty": (2, 160),
 }
 _DEFAULT_COMMENT_LIMIT = (2, 180)
@@ -387,41 +388,32 @@ def comment_strategy(tone: str) -> str:
     return picked if picked in COMMENT_LIMITS else "validating"
 
 
-_TLDR_RE = re.compile(r"^\**\s*tl\s*;?\s*dr\s*:?\s*\**\s*:?\s*(.+)$", re.I)
-_BULLET_RE = re.compile(r"^(?:[-*\u2022\u00b7]|\d+[.)])\s+(.+)$")
-
-
 def _shape_formatting_comment(value: str) -> str:
-    """`**TL;DR:** line` + blank line + 2-3 `- **Header:** sentence` bullets, or ""."""
-    tldr = ""
-    bullets: List[str] = []
-    for line in value.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        if not tldr:
-            match = _TLDR_RE.match(line)
-            if match:
-                tldr = match.group(1).replace("**", "").strip()
-            continue
-        match = _BULLET_RE.match(line)
-        if not match:
-            continue
-        item = re.sub(r"(?<!\*)\*(?!\*)", "", match.group(1)).strip()
-        if item.count("**") % 2:
-            item = item.replace("**", "")
-        if item:
-            bullets.append(f"- {item}")
-    if not tldr or len(bullets) < 2:
-        return ""
-    bullets = bullets[:3]
-    while True:
-        out = f"**TL;DR:** {tldr}\n\n" + "\n".join(bullets)
-        if len(out) <= COMMENT_LIMITS["formatting"][1]:
-            return out
-        if len(bullets) <= 2:
-            return ""
-        bullets = bullets[:-1]
+    """Two short plain lines. Drop TL;DR labels and bold bullet headers."""
+    text = (value or "").replace("**", "").strip()
+    text = re.sub(r"(?im)^\s*tl\s*;?\s*dr\s*:?\s*", "", text)
+    lines: List[str] = []
+    for raw in text.split("\n"):
+        line = raw.strip()
+        line = re.sub(r"^(?:[-*\u2022\u00b7]|\d+[.)])\s+", "", line)
+        if line:
+            lines.append(line)
+    if not lines:
+        lines = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    lines = lines[:2]
+    out = "\n".join(lines).strip()
+    limit = COMMENT_LIMITS["formatting"][1]
+    if len(out) > limit:
+        kept: List[str] = []
+        used = 0
+        for line in lines:
+            extra = len(line) + (1 if kept else 0)
+            if used + extra > limit:
+                break
+            kept.append(line)
+            used += extra
+        out = "\n".join(kept).strip()
+    return out
 
 
 def local_comment_for_post(analysis: Dict[str, object]) -> str:
@@ -429,25 +421,83 @@ def local_comment_for_post(analysis: Dict[str, object]) -> str:
     raise RuntimeError("no title fallback for comments")
 
 
-def _clean_comment(text: str, expand: bool = True, strategy: str = "") -> str:
+def _rewrite_comment_dashes(text: str) -> str:
+    """Turn em/en dashes and -- into a comma or period so one dash does not drop the comment."""
+
+    def _punct(match: re.Match[str]) -> str:
+        rest = match.group(1) or ""
+        if rest[:1].isupper():
+            return ". " + rest
+        return ", " + rest
+
+    value = str(text or "")
+    value = re.sub(r"\s*[—–]\s*(\S*)", _punct, value)
+    value = re.sub(r"\s+--\s*(\S*)", _punct, value)
+    value = re.sub(r"(?<=\S)--(?=\S)", ", ", value)
+    value = re.sub(r"\s+,", ",", value)
+    value = re.sub(r",\s+", ", ", value)
+    value = re.sub(r"\s+\.", ".", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return value.strip()
+
+
+def _humanize_comment(value: str, strategy: str = "") -> str:
+    """Keep contractions; split or trim one long even sentence. No fake typos."""
+    text = _rewrite_comment_dashes((value or "").replace("’", "'").replace("‘", "'"))
+    if not text:
+        return ""
+    most, limit = COMMENT_LIMITS.get(strategy, _DEFAULT_COMMENT_LIMIT)
+    most = max(int(most or 0), 2)
+    if "\n" in text and strategy == "formatting":
+        lines = [line.strip() for line in text.split("\n") if line.strip()][:2]
+        out = "\n".join(lines)
+        return out if len(out) <= limit else lines[0][:limit].rsplit(" ", 1)[0].strip()
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    if len(parts) == 1 and len(parts[0]) > min(int(limit), 160):
+        split = re.split(r";\s+|,\s+(?:and|but)\s+", parts[0], maxsplit=1)
+        if len(split) == 2 and len(re.findall(r"[A-Za-z]", split[0])) >= 12:
+            first = split[0].rstrip(",; ").strip()
+            if first and first[-1] not in ".!?":
+                first += "."
+            second = split[1].strip()
+            if second[:1].islower():
+                second = second[0].upper() + second[1:]
+            parts = [first, second]
+    if not parts:
+        return ""
+    if len(parts[0]) > limit:
+        trimmed = parts[0][:limit].rsplit(" ", 1)[0].rstrip(",;")
+        return trimmed
+    out = parts[0]
+    for part in parts[1:most]:
+        longer = f"{out} {part}"
+        if len(longer) > limit:
+            break
+        out = longer
+    return out
+
+
+def _clean_comment(text: str, expand: bool = False, strategy: str = "") -> str:
     value = _strip_think(text or "").strip()
     value = _strip_fences(value)
     value = _unwrap_comment_quotes(value)
+    if looks_like_automation(value):
+        return ""
     value = re.sub(r"(?is)^(?:sure|okay|ok|here(?:'s| is)|comment:)\s*[:\-]*\s*", "", value)
-    markdown = strategy == "formatting"
-    value = _strip_comment_chars(value, keep_markdown=markdown)
-    if expand:
-        value = _expand_contractions(value)
-    else:
-        value = value.replace("’", "'").replace("‘", "'")
-    if markdown:
+    value = _strip_comment_chars(value, keep_markdown=False)
+    value = value.replace("’", "'").replace("‘", "'")
+    if strategy == "formatting":
         value = _shape_formatting_comment(value)
         if not value:
             return ""
     else:
         most, limit = COMMENT_LIMITS.get(strategy, _DEFAULT_COMMENT_LIMIT)
         parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", value) if part.strip()]
-        if not parts or len(parts[0]) > limit:
+        if not parts:
+            return ""
+        if len(parts[0]) > limit:
+            parts[0] = parts[0][:limit].rsplit(" ", 1)[0].rstrip(",;")
+        if not parts[0]:
             return ""
         value = parts[0]
         for part in parts[1:most]:
@@ -455,6 +505,7 @@ def _clean_comment(text: str, expand: bool = True, strategy: str = "") -> str:
             if len(longer) > limit:
                 break
             value = longer
+    value = _humanize_comment(value, strategy)
     letters = len(re.findall(r"[A-Za-z]", value))
     if letters < 18:
         return ""
@@ -529,13 +580,98 @@ _AUTOMATION_TELLS = (
     r"\bhope this helps\b",
     r"\bi hear you\b",
     r"\bit is important to note\b",
+    r"\bit'?s worth noting\b",
+    r"\bthat'?s a great point\b",
+    r"\bthat is a great point\b",
     r"\bi would argue\b",
     r"\bas an avid\b",
     r"\blet me be honest\b",
     r"\bnot gonna lie\b",
     r"\bi cannot stress (?:this|enough)\b",
 )
-_AUTOMATION_RE = re.compile("|".join(_AUTOMATION_TELLS), re.I)
+# Short-comment overlap from humanizer / stop-slop. One hit drops the draft.
+_SLOP_TELLS = (
+    r"\blet me know\b",
+    r"\bwould you like\b",
+    r"^\s*(?:certainly|of course)\b",
+    r"\b(?:certainly|of course)!",
+    r"\bhere(?:'s| is) the thing\b",
+    r"\bat its core\b",
+    r"\bthe real question is\b",
+    r"\blet'?s dive in\b",
+    r"\bit(?:'s| is) not just\b",
+    r"\bnot only\b[\s\S]{0,60}\bbut(?: also)?\b",
+    r"\bdelve(?:s|d|ing)?\b",
+    r"\bpivotal\b",
+    r"\btapestry\b",
+    r"\btestament\b",
+    r"\bunderscor(?:e|es|ed|ing)\b",
+    r"\bfostering\b",
+    r"\bshowcasing\b",
+    r"\bvibrant\b",
+    r"\bcrucial\b",
+    r"\bintricate(?:ly|s)?\b",
+    r"\bserves as\b",
+    r"\bstands as\b",
+    r"\bexciting times\b",
+    r"\bthe future looks bright\b",
+    r"\bit turns out\b",
+    r"\bthe truth is\b",
+    r"\bat the end of the day\b",
+    r"\bwhen it comes to\b",
+    r"\bin a world where\b",
+    r"\blet that sink in\b",
+    r"\bthink about it\b",
+    r"\band that(?:'s| is) okay\b",
+    r"\bgame[- ]changer\b",
+    r"\bdeep dive\b",
+    r"\bunpack\b",
+    r"\blean into\b",
+)
+_AUTOMATION_RE = re.compile("|".join(_AUTOMATION_TELLS + _SLOP_TELLS), re.I)
+_VOICE_BLOB_CACHE: Optional[str] = None
+_VOICE_BLOB_LOADED = False
+_VOICE_BLOB_MAX = 1600
+
+
+def comment_voice_blob() -> str:
+    """Cached extract from prompts/comment-voice.md. Empty if the file is missing."""
+    global _VOICE_BLOB_CACHE, _VOICE_BLOB_LOADED
+    if _VOICE_BLOB_LOADED:
+        return _VOICE_BLOB_CACHE or ""
+    _VOICE_BLOB_LOADED = True
+    _VOICE_BLOB_CACHE = ""
+    try:
+        from reddit_joiner.paths import COMMENT_VOICE_FILE
+
+        path = Path(COMMENT_VOICE_FILE)
+        if not path.is_file():
+            return ""
+        raw = path.read_text(encoding="utf-8").strip()
+        lines = []
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            lines.append(stripped)
+        blob = " ".join(lines)
+        blob = re.sub(r"\s+", " ", blob).strip()
+        if len(blob) > _VOICE_BLOB_MAX:
+            blob = blob[:_VOICE_BLOB_MAX].rsplit(" ", 1)[0].strip()
+        _VOICE_BLOB_CACHE = blob
+    except Exception:
+        _VOICE_BLOB_CACHE = ""
+    return _VOICE_BLOB_CACHE or ""
+
+
+def _clean_post_field(text: str) -> str:
+    """Dash-rewrite a post title or body; drop it if it still looks like slop."""
+    value = _rewrite_comment_dashes(
+        (text or "").replace("’", "'").replace("‘", "'")
+    ).strip()
+    if not value or looks_like_automation(value):
+        return ""
+    return value
 
 
 def _strip_think(text: str) -> str:
@@ -544,7 +680,7 @@ def _strip_think(text: str) -> str:
         value = re.sub(rf"<{tag}>[\s\S]*?</{tag}>", " ", value, flags=re.I)
         # Unclosed reasoning block: everything after the opening tag is monologue.
         value = re.sub(rf"<{tag}>[\s\S]*$", " ", value, flags=re.I)
-    # Line breaks survive so a TL;DR + bullets comment keeps its layout.
+    # Line breaks survive so a two-line formatting comment keeps its layout.
     value = re.sub(r"[^\S\n]+", " ", value)
     value = re.sub(r" ?\n ?", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
@@ -1069,14 +1205,15 @@ def _comment_uses_post(comment: str, title: str, body: str) -> bool:
     return any(word in blob for word in words[:12])
 
 
-FULL_WORDS_SHARE = 0.5  # share of comments written without contractions
+FULL_WORDS_SHARE = 0  # never expand contractions; that reads as AI
 COPIED_RUN_WORDS = 6
 REPLY_SIMILARITY_MAX = 0.6
 
 _GENERIC_OPENERS = re.compile(
     r"^\s*(?:great question|good question|totally agree|i totally agree|this is so true|"
     r"so true|same here|good luck|best of luck|you got this|you've got this|"
-    r"interesting|following|love this|this!|this\.)\b",
+    r"interesting|following|love this|this!|this\.|absolutely|that'?s a great point|"
+    r"hope this helps|i hear you|it'?s worth noting)\b",
     re.I,
 )
 _FILLER_ONLY = re.compile(
@@ -1153,31 +1290,24 @@ def generate_ai_comment(
         picked = "validating"
     tone_line = {
         "formatting": (
-            "Strategy: make the answer easy to scan. First line: **TL;DR:** and a "
-            "one-sentence answer. Then one blank line. Then 2 or 3 lines that each "
-            "start with '- ' and a short **bold sub-header:** followed by one plain "
-            "sentence. Nothing before the TL;DR line and nothing after the bullets."
+            "Strategy: two short lines that list a practical take. Plain text only. "
+            "No TL;DR, no bold headers, no bullets. Name one specific detail from the post."
         ),
         "validating": (
-            "Strategy: strong, warm validation. Back up their point or choice and say "
-            "why it works, naming one specific detail from the post. Then add one "
-            "short first-person sentence about a similar, ordinary experience you had. "
-            "2 or 3 sentences."
+            "Strategy: agree with one specific detail from the post. "
+            "One or two short sentences is enough. No required personal story."
         ),
         "curious": (
-            "Strategy: curious follow-up. Start by appreciating the effort or one detail "
-            "they put in, named specifically. Then ask one open-ended question that "
-            "invites them to share more (how they decided, what they would change, what "
-            "surprised them). End with that question. 2 sentences."
+            "Strategy: mention one detail they wrote, then ask one open question. "
+            "A fragment plus a question is fine."
         ),
         "witty": (
-            "Strategy: light self-deprecating humour. In 1 or 2 short punchy lines, "
-            "contrast their situation with your own small everyday struggle. The joke is "
-            "always on you, never on them. Kind, on topic, no sarcasm."
+            "Strategy: light self-deprecating humour on this exact topic. "
+            "One or two short lines. The joke is on you, never on them."
         ),
     }[picked]
     length_line = {
-        "formatting": "Keep the whole comment under 400 characters.",
+        "formatting": "Keep the whole comment under 220 characters.",
         "validating": "Keep it under 220 characters.",
         "curious": "Keep it under 200 characters.",
         "witty": "Keep it under 150 characters.",
@@ -1187,15 +1317,11 @@ def generate_ai_comment(
         if picked == "curious"
         else "Do not ask the poster a question. "
     )
-    markup_line = (
-        "Use Markdown only for the **bold** parts and the '- ' bullets. No headings, no links. "
-        if picked == "formatting"
-        else "Plain text only. No asterisks, no bullets, no Markdown. "
-    )
+    markup_line = "Plain text only. No asterisks, no bullets, no Markdown, no TL;DR. "
     core_line = (
         "Hard rules: no emojis or emoticons. Stay positive and non-contentious: no arguing, "
-        "no politics, no correcting or criticising the poster or anyone else. Sound like a "
-        "regular person: never say as an AI, interesting post, great post, or thanks for sharing. "
+        "no politics, no correcting or criticising the poster or anyone else. "
+        "Never say as an AI, interesting post, great post, or thanks for sharing. "
     )
     mood_line = {
         "negative": "The post is frustrated or unhappy. Be careful and empathetic. Do not cheerlead or say the post is great.",
@@ -1248,8 +1374,7 @@ def generate_ai_comment(
     ask_line = {
         "formatting": (
             f"What they want: {ask}\n"
-            "The TL;DR answers that directly. Each bullet gives one concrete thing: "
-            "a name, a number, a step, or a reason. "
+            "Answer that in two short lines. One concrete step or reason per line. "
         ),
         "validating": (
             f"What they want: {ask}\n"
@@ -1273,12 +1398,13 @@ def generate_ai_comment(
         if seen
         else ""
     )
-    full_words = random.random() < FULL_WORDS_SHARE
+    full_words = False
     style_line = (
-        'Write full words. Do not use contractions. Write "I have" not "I\'ve", '
-        '"do not" not "don\'t", "I would" not "I\'d", "it is" not "it\'s". '
-        if full_words
-        else "Write casually. Normal contractions are fine (don't, it's, I'd). "
+        "Write like a person typing on their phone in that thread. "
+        "Use normal contractions (don't, it's, I'd). "
+        "Prefer 1 or 2 short sentences, or one fragment plus one sentence. "
+        "Uneven length is fine. Do not write a polished essay. "
+        "No em dashes, en dashes, or --. State the point; no warm-up and no upbeat closer. "
     )
     prompt = (
         f"Write one Reddit comment for {place}, as if you typed it on your phone. "
@@ -1288,7 +1414,8 @@ def generate_ai_comment(
         f"{core_line}{length_line} "
         "Do not pad. Do not narrate yourself. "
         "Do not write I sound, that sounds, as someone who, in my humble opinion, "
-        "just my two cents, hope this helps, I hear you, or it is important to note. "
+        "just my two cents, hope this helps, I hear you, it is important to note, "
+        "absolutely, that's a great point, or it's worth noting. "
         "Do not open with great question, totally agree, same here, or good luck. "
         f"{question_line}"
         f"{style_line}"
@@ -1300,17 +1427,26 @@ def generate_ai_comment(
         f"Title: {title}\n\n{(body or '')[:1200]}"
     )
     system = (
-        "You write Reddit comments that sound like a person typed them. "
-        "Follow the given strategy, shape, and length exactly. No emojis. "
+        "You write Reddit comments like a person typing on their phone in the thread, "
+        "not like an assistant following a template. "
+        "Use contractions. 1 or 2 short uneven sentences is enough. No emojis. "
         "Stay positive and non-contentious. No self-narration. "
         "Follow the community rules if they were given. "
-        "Never mention being a bot, an AI, karma, or that the account is new."
+        "Never mention being a bot, an AI, karma, or that the account is new. "
+        "No em/en dashes or --. No chatbot leftovers (let me know, would you like, certainly, "
+        "of course, here's the thing, at its core, the real question is, let's dive in). "
+        "No it's-not-just / not-only-but. No essay words (delve, pivotal, tapestry, testament, "
+        "underscore, fostering, showcasing, vibrant, crucial, intricate, serves as, stands as). "
+        "No exciting times or the future looks bright."
     )
+    voice = comment_voice_blob()
+    if voice:
+        system = f"{system} {voice}"
     try:
         text, provider = _llm_text(
             prompt,
             system,
-            max_tokens=220 if picked == "formatting" else 120,
+            max_tokens=120,
             fast=True,
             prefer="openai",
             timeout=COMMENT_MODEL_TIMEOUT,
@@ -1320,7 +1456,7 @@ def generate_ai_comment(
         raise RuntimeError(
             f"comment model timed out ({_scrub_secret(str(exc))})"
         ) from exc
-    cleaned = _clean_comment(text, expand=full_words, strategy=picked)
+    cleaned = _clean_comment(text, expand=False, strategy=picked)
     if not cleaned:
         raise RuntimeError(f"AI comment was empty, off-shape for {picked}, or looked automated")
     ok, why = comment_fits_post(cleaned, title, body, seen)
@@ -1397,6 +1533,9 @@ def generate_ai_post(
         f"You write one natural Reddit post for r/{name} after reading today's threads. "
         "Human tone. Follow the rules. Continue the recent discussion without copying it."
     )
+    voice = comment_voice_blob()
+    if voice:
+        system = f"{system} {voice}"
     text, provider = _llm_text(prompt, system, max_tokens=320)
     data = _parse_json_object(text)
     title = re.sub(r"\s+", " ", (data.get("title") or "")).strip().strip('"')[:300]
@@ -1405,12 +1544,10 @@ def generate_ai_post(
         # First-line salvage when the model ignored the JSON instruction. Only
         # usable if it reads like a title rather than the model's preamble.
         line = _strip_fences(_strip_think(text)).splitlines()[0].strip().strip('"') if text else ""
-        if line and not looks_like_automation(line):
-            title = line[:120]
-    if looks_like_automation(title):
-        title = ""
-    if looks_like_automation(body):
-        body = ""
+        title = _clean_post_field(line)[:120] if line else ""
+    else:
+        title = _clean_post_field(title)[:300]
+    body = _clean_post_field(body)
     if not title or not body:
         # Fall back wholesale rather than pairing a salvaged title with a canned
         # body, which used to let a prompt-leak title through on its own.

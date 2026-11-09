@@ -27,8 +27,8 @@ from reddit_joiner.paths import DB_PATH as _DB_PATH, RL_MODEL_FILE as _RL_MODEL_
 DEFAULT_MODEL = str(_RL_MODEL_FILE)
 DEFAULT_DB = str(_DB_PATH)
 
-# Comment strategies: formatting = TL;DR + bold bullets, validating = agree +
-# detail + short personal mirror, curious = compliment + open question,
+# Comment strategies: formatting = two short practical lines, validating = agree +
+# one detail, curious = compliment + open question,
 # witty = 1-2 light self-deprecating lines.
 COMMENT_STRATEGIES = ("formatting", "validating", "curious", "witty")
 DEFAULT_COMMENT_STRATEGY = "validating"

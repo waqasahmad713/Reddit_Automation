@@ -35,6 +35,8 @@ COMMUNITY_MEMORY_PATH = DATA_DIR / "community_memory.json"
 SUMMARIES_DIR = DATA_DIR / "summaries"
 LOGS_DIR = PROJECT_ROOT / "logs"
 REPORTS_DIR = PROJECT_ROOT / "reports"
+PROMPTS_DIR = PROJECT_ROOT / "prompts"
+COMMENT_VOICE_FILE = PROMPTS_DIR / "comment-voice.md"
 
 
 def ensure_runtime_dirs() -> None:

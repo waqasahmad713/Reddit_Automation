@@ -4,7 +4,7 @@ Automate human-like Reddit browsing, AI comments, and spreadsheet posts
 across AdsPower profiles.
 
 Step 1 — Launch AdsPower profile (Start API + Selenium debuggerAddress)
-Step 2 — 6–15 min human activity: Home first, then sub → Home hops.
+Step 2 — 7–20 min human activity: Home first, then sub → Home hops.
          1 post + 2 comments / 48h. Bouncy scroll; skip image/video.
 Step 3 — 2 general comments on new posts or comments.csv links.
 Step 4 — Account summary (AI comments, upvotes, live posts)
@@ -113,16 +113,13 @@ from reddit_joiner.sheets import (  # noqa: E402
     account_group,
     accounts_sheet_path,
     append_target_related,
-    apply_dead_status_to_accounts_sheet,
     clean_subreddit_name,
-    disable_account_in_sheet,
     ensure_accounts_sheet,
     ensure_subreddits_sheet,
     ensure_targeted_related_sheet,
     is_targeted_mode,
     load_account_ids_from_sheet,
     load_browse_subreddits,
-    load_outside_lookup_reports,
     load_profile_ids,
     load_target_groups,
     load_target_related,
@@ -145,11 +142,11 @@ SUBREDDITS: List[str] = [
     "AskUK",
 ]
 SUBREDDITS_TO_BROWSE = SUBREDDITS
-SUBREDDITS_PER_SESSION = (1, 3)  # rolled again each sitting from subreddits.csv
+SUBREDDITS_PER_SESSION = (1, 10)  # rolled again each sitting from subreddits.csv
 SUBREDDIT_ROTATION_RUNS = 1  # prefer sheet communities not used last sitting
-RANDOM_EXPLORE_PER_SESSION = (0, 3)  # extra random communities, including none
+RANDOM_EXPLORE_PER_SESSION = (1, 3)  # extras when a sitting explores
 EXPLORE_RANDOM_SUBS = True
-EXPLORE_SHARE = 0.30  # unused for count; each sitting rolls explore_n instead
+EXPLORE_SHARE = (0.03, 0.05)  # share of accounts this session that explore
 _HOME_EXTRAS = ("popular", "inbox", "news")
 _BROWSE_ACTIONS = ("scroll", "break", "hover", "upvote", "open-post")
 # A random explore is skipped for this many later sittings on the same account,
@@ -176,7 +173,7 @@ _JOIN_ARRIVE_LABELS = {
 
 ACTIVITY_ON_HOMEPAGE = 12  # unused; home time comes from HOME_ACTIVITY_SHARE
 ACTIVITY_ON_SUBREDDIT = (12, 28)  # quick look inside a community, then back to Home
-ACCOUNT_SESSION_SECONDS = 10 * 60  # fallback only; live sittings roll 6–15 min
+ACCOUNT_SESSION_SECONDS = 12 * 60  # fallback only; live sittings roll 7–20 min
 POST_IN_SESSION_FRACTION = 0.45  # attempt post mid-sitting when there is room
 HOME_ACTIVITY_SHARE = 0.65  # default; each sitting rolls its own Home share
 HOME_ACTIVITY_SHARE_RANGE = (0.52, 0.78)
@@ -322,11 +319,11 @@ GENERAL_COMMENT_OPENS_PER_SUB = 3
 KARMA_GROWTH_ENABLED = True
 COMMUNITY_GENERAL_POST = True  # when posts.csv has no row, write one post that fits the community
 GENERAL_POSTS_PER_WEEK = POSTS_PER_WINDOW
-MIN_KARMA_TO_POST = 6  # community can still require more; age gate is day 14
-GENERAL_COMMENT_MIN_AGE_DAYS = 8  # comments from day 8
-WARMUP_MIN_AGE_DAYS = 4  # upvotes from day 4
+MIN_KARMA_TO_POST = 6  # community can still require more; age gate is per account
+GENERAL_COMMENT_MIN_AGE_DAYS = 8  # range high; each account rolls comment day 2–8
+WARMUP_MIN_AGE_DAYS = 4  # range high for joins
 WARMUP_MIN_KARMA = 5  # karma 5 or less still cannot post
-MAX_JOINS_PER_SESSION = 1  # one new Join click per sitting from day 4
+MAX_JOINS_PER_SESSION = 4  # rolled 1–4 new Join clicks per sitting after this account's join day
 MAX_JOINS_SAME_SUB_PER_CYCLE = 1
 GENERAL_POST_DAYS = ACTION_WINDOW_DAYS
 KARMA_POST_DAYS = GENERAL_POST_DAYS
@@ -408,7 +405,7 @@ PROFILE_RAM_RESERVE_MB = 800.0
 PARALLEL_START_STAGGER = (7.0, 28.0)  # seconds between launching each Chrome
 
 # Each account gets its own sitting length and start time this run.
-SESSION_SECONDS_RANGE = (6 * 60, 15 * 60)
+SESSION_SECONDS_RANGE = (7 * 60, 20 * 60)
 # AdsPower copies profile files on start. A full /home disk is why browsers
 # fail with "Failed to start browser" and logs die with "No space left on device".
 MIN_FREE_DISK_MB = 400.0
@@ -534,9 +531,7 @@ def roll_activity_menu(rng: random.Random) -> ActivityMenu:
     return ActivityMenu(
         home_extras=tuple(extras),
         search_when=rng.choice(("after_home", "after_first_hop")),
-        leftover_dest=rng.choices(
-            ("home", "visited_subs", "skip"), weights=(55, 30, 15), k=1
-        )[0],
+        leftover_dest="home",
         skip_join_on_explore=rng.random() < 0.40,
         skip_rules_on_explore=rng.random() < 0.45,
         home_gap=rng.choices(("on", "rare", "off"), weights=(50, 32, 18), k=1)[0],
@@ -651,6 +646,19 @@ class SessionStyle:
                 names,
             )
         )
+
+
+def pick_explore_n(
+    rng: Optional[random.Random] = None, user_id: str = ""
+) -> int:
+    """Chosen session accounts get 1–3 extras. Everyone else stays on sheet subs."""
+    if not account_may_explore(user_id):
+        return 0
+    dice = rng or _rng()
+    lo, hi = RANDOM_EXPLORE_PER_SESSION
+    lo_n = max(1, int(lo))
+    hi_n = max(lo_n, int(hi))
+    return dice.randint(lo_n, hi_n)
 
 
 def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
@@ -816,7 +824,7 @@ def roll_session_style(user_id: str = "", label: str = "") -> SessionStyle:
         home_share=home_share,
         community_share=community_share,
         home_skip_chance=home_skip,
-        explore_n=rng.randint(*RANDOM_EXPLORE_PER_SESSION),
+        explore_n=pick_explore_n(rng, user_id),
         search_n=rng.randint(*SEARCHES_PER_SESSION),
         type_char=_shift_pair(rng, (0.03, 0.11), 0.65, 1.45, min_lo=0.018),
         type_space=_shift_pair(rng, (0.05, 0.18), 0.7, 1.4, min_lo=0.03),
@@ -868,7 +876,7 @@ def remember_session_pattern(user_id: str, fingerprint: str) -> None:
     used = [str(item) for item in (data.get(user_id) or []) if item]
     if fingerprint not in used:
         used.append(fingerprint)
-    data[user_id] = used[-80:]
+    data[user_id] = used
     try:
         _save_session_patterns(data)
     except Exception:
@@ -908,12 +916,25 @@ def unique_session_plan(
             _batch_style_fps.add(fingerprint)
             return True
 
+    def _nudge(style: SessionStyle, subs: List[str]) -> str:
+        rng = _rng()
+        extras = list(style.menu.home_extras)
+        rng.shuffle(extras)
+        style.menu.home_extras = tuple(extras)
+        style.seed = secrets.randbits(64)
+        style.pulse_every = rng.uniform(8.0, 34.0)
+        style.leftover_mode = f"{str(style.leftover_mode).split('-')[0]}-{secrets.token_hex(3)}"
+        style.home_share = rng.uniform(*HOME_ACTIVITY_SHARE_RANGE)
+        return style.fingerprint(subs)
+
     race_logged = False
-    for _ in range(40):
+    retried = False
+    for _ in range(80):
         style = _apply(roll_session_style(user_id, label))
         subs = pick_session_subreddits(user_id, karma, age_days)
         fingerprint = style.fingerprint(subs)
         if pattern_already_used(user_id, fingerprint):
+            retried = True
             last_style, last_subs, last_fp = style, subs, fingerprint
             continue
         if not reserve_subreddits(user_id, subs):
@@ -929,8 +950,11 @@ def unique_session_plan(
             continue
         if not _claim(fingerprint):
             release_live_subreddits(user_id, subs)
+            retried = True
             last_style, last_subs, last_fp = style, subs, fingerprint
             continue
+        if retried:
+            log(f"[Profile {label}] new sitting pattern (not used before)")
         remember_session_pattern(user_id, fingerprint)
         return style, subs, fingerprint
     for _ in range(5):
@@ -943,19 +967,27 @@ def unique_session_plan(
             "— sharing the least-used ones"
         )
     last_style = _apply(last_style)
-    last_style.leftover_mode = f"{last_style.leftover_mode}-{secrets.token_hex(2)}"
-    extras = list(last_style.menu.home_extras)
-    _rng().shuffle(extras)
-    last_style.menu.home_extras = tuple(extras)
-    last_style.menu.search_when = (
-        "after_first_hop"
-        if last_style.menu.search_when == "after_home"
-        else "after_home"
-    )
-    last_fp = last_style.fingerprint(last_subs)
-    _claim(last_fp)
-    remember_session_pattern(user_id, last_fp)
-    return last_style, last_subs, last_fp
+    fingerprint = last_fp
+    for _ in range(40):
+        fingerprint = _nudge(last_style, last_subs)
+        if pattern_already_used(user_id, fingerprint):
+            continue
+        if _claim(fingerprint):
+            log(f"[Profile {label}] new sitting pattern (not used before)")
+            remember_session_pattern(user_id, fingerprint)
+            return last_style, last_subs, fingerprint
+    while True:
+        last_style.leftover_mode = (
+            f"{str(last_style.leftover_mode).split('-')[0]}-{secrets.token_hex(8)}"
+        )
+        fingerprint = last_style.fingerprint(last_subs)
+        if pattern_already_used(user_id, fingerprint):
+            continue
+        if _claim(fingerprint):
+            break
+    log(f"[Profile {label}] new sitting pattern (not used before)")
+    remember_session_pattern(user_id, fingerprint)
+    return last_style, last_subs, fingerprint
 
 
 def assign_profile_schedules(
@@ -966,7 +998,7 @@ def assign_profile_schedules(
         return {}
     lo_min = SESSION_SECONDS_RANGE[0] / 60.0
     hi_min = SESSION_SECONDS_RANGE[1] / 60.0
-    # Keep sittings distinct inside the 6–15 min band (~20s apart).
+    # Keep sittings distinct inside the 7–20 min band (~20s apart).
     min_gap_min = 0.35
     minutes: List[float] = []
     for _ in targets:
@@ -1165,7 +1197,7 @@ def pick_news_subreddit(user_id: str) -> str:
 def maybe_read_news(
     driver: WebDriver, label: str, stats: AccountSummary, force: bool = False
 ) -> None:
-    if not warmup_ladder.may_news(stats.account_age_days):
+    if not warmup_ladder.may_news(stats.account_age_days, stats=stats):
         return
     if int(stats.news_reads or 0) >= 2:
         return
@@ -1229,7 +1261,7 @@ def maybe_read_news(
 
 
 def maybe_follow_commenter(driver: WebDriver, label: str, stats: AccountSummary) -> None:
-    if not warmup_ladder.may_follow(stats.account_age_days):
+    if not warmup_ladder.may_follow(stats.account_age_days, stats=stats):
         return
     chance = _rng().uniform(*warmup_ladder.FOLLOW_CHANCE_RANGE)
     if _rng().random() > chance:
@@ -1290,6 +1322,8 @@ def hop_reddit_home(
 ) -> float:
     """Random Home activity — always between communities. Returns seconds used."""
     dwell = max(MIN_HOME_HOP, float(seconds))
+    if stats is not None and stats.is_banned():
+        return 0.0
     if dwell >= 90:
         log(f"[Profile {label}] {dwell / 60:.1f} min random activity on Home ({reason})")
     else:
@@ -1340,6 +1374,8 @@ def visit_sheet_post_community(
     """Open the posts.csv community, optionally Join, then the usual browse. No post."""
     name = normalize_subreddit(subreddit)
     if not name:
+        return 0.0
+    if stats is not None and stats.is_banned():
         return 0.0
     started = time.time()
     way = pick_join_arrive_way(stats, preferred=(stats.explore_how or {}).get(name.lower(), ""))
@@ -1412,6 +1448,51 @@ def plan_sheet_post_return_hops(hops: List[str], target: str) -> List[str]:
     # 0 = after the Home gap only; len(others) = after every other community.
     insert_at = _rng().randint(0, len(others))
     return others[:insert_at] + [name] + others[insert_at:]
+
+
+def unique_session_hops(names: List[str]) -> List[str]:
+    """Keep the first visit to each subreddit this sitting."""
+    seen = set()
+    out: List[str] = []
+    for raw in names:
+        name = normalize_subreddit(raw)
+        key = name.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def keep_quiet_sheet_pick(
+    names: List[str], rng: Optional[random.Random] = None
+) -> List[str]:
+    """Quiet sittings still open one reserved sheet community when the pick is non-empty."""
+    cleaned = unique_session_hops(list(names))
+    if not cleaned:
+        return []
+    picker = rng or _rng()
+    picker.shuffle(cleaned)
+    return cleaned[:1]
+
+
+def order_sheet_then_explore(
+    sheet_names: List[str],
+    explore_names: List[str],
+    rng: Optional[random.Random] = None,
+) -> List[str]:
+    """Open the random sheet communities first; explore hops come after."""
+    picker = rng or _rng()
+    sheet = unique_session_hops(list(sheet_names))
+    sheet_keys = {name.lower() for name in sheet}
+    explore = [
+        name
+        for name in unique_session_hops(list(explore_names))
+        if name.lower() not in sheet_keys
+    ]
+    picker.shuffle(sheet)
+    picker.shuffle(explore)
+    return sheet + explore
 
 
 _SKIP_EXPLORE_SUBS = {
@@ -2371,6 +2452,7 @@ class AccountSummary:
     sitting_ok: bool = True
     session_started_at: float = 0.0
     upvote_target: int = 0
+    join_target: int = 0
     comment_upvotes: int = 0
     news_reads: int = 0
     follows_this_run: int = 0
@@ -2408,7 +2490,12 @@ class AccountSummary:
 
     def is_banned(self) -> bool:
         text = (self.account_status or "").lower()
-        return "banned" in text or "suspended" in text
+        return (
+            "banned" in text
+            or "suspended" in text
+            or "server error" in text
+            or "we had a server" in text
+        )
 
     def is_warmup_browse(self) -> bool:
         allowed, _why = account_may_general_comment(self)
@@ -2418,6 +2505,9 @@ class AccountSummary:
         who = self.display_name()
         if not self.sitting_ok:
             return f"{who} | browser did not start"
+        status = (self.account_status or "").strip()
+        if "server error" in status.lower() or "we had a server" in status.lower():
+            return f"{who} | we had a server error"
         if self.is_banned():
             return f"{who} | banned"
         if (self.account_status or "").strip():
@@ -2428,7 +2518,7 @@ class AccountSummary:
         if self.target_group:
             parts.append(f"target: {self.target_group}")
         if self.is_warmup_browse():
-            parts.append(warmup_ladder.day_band_label(self.account_age_days))
+            parts.append(warmup_ladder.day_band_label(self.account_age_days, stats=self))
         else:
             placed = self.comments_placed()
             visible = self.comments_visible()
@@ -2613,11 +2703,16 @@ def _analytics_status(item: AccountSummary) -> str:
     if not item.sitting_ok:
         return "no browser"
     if item.is_banned():
-        return "suspended" if "suspend" in (item.account_status or "").lower() else "banned"
+        status = (item.account_status or "").lower()
+        if "server error" in status or "we had a server" in status:
+            return "server error"
+        return "suspended" if "suspend" in status else "banned"
     if (item.account_status or "").strip():
         return item.account_status.strip()[:12]
-    if item.account_age_days and item.account_age_days < warmup_ladder.COMMENT_MIN_AGE_DAYS:
-        return f"warmup d{item.account_age_days:.0f}"
+    if item.account_age_days:
+        allowed, _why = warmup_ladder.may_comment(item.account_age_days, stats=item)
+        if not allowed:
+            return f"warmup d{item.account_age_days:.0f}"
     return "live"
 
 
@@ -3277,7 +3372,7 @@ def general_comment_need(
 
 def account_may_post(stats: AccountSummary) -> Tuple[bool, str]:
     _karma, age = _account_karma_age(stats)
-    allowed, why = warmup_ladder.may_post(age)
+    allowed, why = warmup_ladder.may_post(age, stats=stats)
     if not allowed:
         return False, why
     karma = int(stats.account_karma or 0)
@@ -3298,7 +3393,7 @@ def account_may_post(stats: AccountSummary) -> Tuple[bool, str]:
 
 def account_may_general_comment(stats: AccountSummary) -> Tuple[bool, str]:
     _karma, age = _account_karma_age(stats)
-    return warmup_ladder.may_comment(age)
+    return warmup_ladder.may_comment(age, stats=stats)
 
 
 def record_account_comment(user_id: str, link: str, text: str, kind: str = "sheet") -> None:
@@ -3385,6 +3480,7 @@ def explored_subreddits(user_id: str, last_n: int = EXPLORE_SKIP_SESSIONS) -> se
 _search_claim_lock = threading.Lock()
 _live_search_norms: set = set()
 _search_account_ids: set = set()
+_explore_account_ids: set = set()
 
 
 def assign_batch_search_accounts(targets: List[Dict[str, str]]) -> None:
@@ -3413,6 +3509,39 @@ def assign_batch_search_accounts(targets: List[Dict[str, str]]) -> None:
 
 def account_may_search(user_id: str = "") -> bool:
     return str(user_id or "") in _search_account_ids
+
+
+def assign_batch_explore_accounts(targets: List[Dict[str, str]]) -> None:
+    """Pick about 3–5% of this session's accounts for random explore. The rest skip it."""
+    global _explore_account_ids
+    ids: List[str] = []
+    seen: set = set()
+    for item in targets:
+        uid = str(item.get("user_id") or "")
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        ids.append(uid)
+    n = len(ids)
+    if n <= 0:
+        _explore_account_ids = set()
+        log("Explore this run: none")
+        return
+    rng = random.Random(secrets.randbits(64))
+    lo_p, hi_p = EXPLORE_SHARE
+    chance = rng.uniform(float(lo_p), float(hi_p))
+    take = min(n, max(1, int(round(n * chance))))
+    allowed = set(rng.sample(ids, take))
+    _explore_account_ids = allowed
+    log(
+        "Explore this run: "
+        + ", ".join(sorted(allowed))
+        + f" ({len(allowed)} of {n} accounts)"
+    )
+
+
+def account_may_explore(user_id: str = "") -> bool:
+    return str(user_id or "") in _explore_account_ids
 
 
 def _norm_search_query(text: str) -> str:
@@ -5197,6 +5326,117 @@ def wait_for_adspower_proxy_phase(label: str) -> None:
     time.sleep(refresh_for)
 
 
+_PROXY_SUCCESS_MARKERS = (
+    "successful request",
+    "sucessful request",
+    "request successful",
+    "refresh success",
+    "刷新成功",
+    "请求成功",
+)
+_FIND_REFRESH_PROXY_JS = r"""
+const re = /refresh\s*proxy(\s*ip)?|刷新代理/;
+const nodes = Array.from(document.querySelectorAll('button, a, [role="button"], span, div'));
+let best = null;
+for (const el of nodes) {
+  if (!el) continue;
+  const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > 48) continue;
+  if (!re.test(t)) continue;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'button' || el.getAttribute('role') === 'button' || tag === 'a') return el;
+  if (!best) best = el;
+}
+return best;
+"""
+
+
+def _proxy_refresh_succeeded(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _PROXY_SUCCESS_MARKERS)
+
+
+def _switch_to_proxy_start_page(driver: WebDriver) -> bool:
+    try:
+        handles = list(driver.window_handles or [])
+    except Exception:
+        handles = []
+    current = ""
+    try:
+        current = driver.current_window_handle
+    except Exception:
+        current = ""
+    for handle in handles or [current]:
+        if not handle:
+            continue
+        try:
+            if handle != current:
+                driver.switch_to.window(handle)
+        except Exception:
+            continue
+        url = ""
+        try:
+            url = (driver.current_url or "").lower()
+        except Exception:
+            url = ""
+        text = _browser_page_text(driver)
+        if (
+            "start.adspower" in url
+            or "ip-check" in url
+            or "ipcheck" in url
+            or "refresh proxy" in text.lower()
+        ):
+            return True
+    return False
+
+
+def click_refresh_proxy_ip(driver: WebDriver, label: str) -> bool:
+    """Click Refresh proxy IP on the AdsPower start page."""
+    prefix = f"[Profile {label}] "
+    if not _switch_to_proxy_start_page(driver):
+        log(f"{prefix}AdsPower start page not found — cannot click Refresh proxy IP")
+        return False
+    try:
+        button = driver.execute_script(_FIND_REFRESH_PROXY_JS)
+    except Exception:
+        button = None
+    if button is None:
+        log(f"{prefix}Refresh proxy IP button not found")
+        return False
+    if not human_click(driver, button):
+        log(f"{prefix}Could not click Refresh proxy IP")
+        return False
+    log(f"{prefix}Clicked Refresh proxy IP — waiting for Successful request")
+    return True
+
+
+def wait_for_proxy_refresh_success(driver: WebDriver, label: str) -> bool:
+    """True when the start page shows Successful request and is not busy."""
+    prefix = f"[Profile {label}] "
+    deadline = time.time() + PROXY_READY_TIMEOUT
+    last_log = 0.0
+    while time.time() < deadline:
+        text = _browser_page_text(driver)
+        if _proxy_refresh_succeeded(text) and not _proxy_page_busy(text):
+            log(f"{prefix}Proxy refresh: Successful request")
+            return True
+        now = time.time()
+        if now - last_log >= 8:
+            left = int(max(0, deadline - now))
+            log(f"{prefix}Waiting for Successful request… {left}s left")
+            last_log = now
+        time.sleep(1.2)
+    log(f"{prefix}Successful request did not appear — continuing after the wait")
+    return False
+
+
+def refresh_proxy_ip_then_ready(driver: WebDriver, label: str, user_id: str) -> str:
+    """Click Refresh proxy IP, wait for Successful request, then read the public IP."""
+    click_refresh_proxy_ip(driver, label)
+    wait_for_proxy_refresh_success(driver, label)
+    return wait_for_proxy_ip(driver, label, user_id)
+
+
 def _browser_page_text(driver: WebDriver) -> str:
     try:
         return str(
@@ -5965,14 +6205,22 @@ def _hover_popup_text(driver: WebDriver) -> str:
 
 
 def _popup_says_server_error(text: str) -> bool:
-    folded = re.sub(r"\s+", " ", text or "")
+    folded = re.sub(r"\s+", " ", (text or "").lower())
     return "we had a server" in folded or "we had server" in folded
 
 
-def _page_says_banned(driver: WebDriver) -> bool:
-    """True when the open page itself is a ban / suspend screen."""
+def _popup_dead_reason(text: str) -> str:
+    folded = re.sub(r"\s+", " ", (text or "").lower())
+    if _popup_says_server_error(folded):
+        return "we had a server error"
+    if any(phrase in folded for phrase in _BAN_PHRASES):
+        return "the account is banned"
+    return ""
+
+
+def _page_text_blob(driver: WebDriver) -> str:
     try:
-        blob = str(
+        return str(
             driver.execute_script(
                 "return ((document.title || '') + '\\n' + "
                 "((document.body && document.body.innerText) || '')).slice(0, 2800);"
@@ -5980,17 +6228,20 @@ def _page_says_banned(driver: WebDriver) -> bool:
             or ""
         ).lower()
     except Exception:
-        blob = ""
-    if any(phrase in blob for phrase in _BAN_PHRASES):
-        return True
-    return _popup_says_server_error(blob)
+        return ""
+
+
+def _page_dead_reason(driver: WebDriver) -> str:
+    return _popup_dead_reason(_page_text_blob(driver))
+
+
+def _page_says_banned(driver: WebDriver) -> bool:
+    """True when the open page itself is a ban / suspend / server-error screen."""
+    return bool(_page_dead_reason(driver))
 
 
 def _popup_says_banned(text: str) -> bool:
-    folded = re.sub(r"\s+", " ", (text or "").lower())
-    if _popup_says_server_error(folded):
-        return True
-    return any(phrase in folded for phrase in _BAN_PHRASES)
+    return bool(_popup_dead_reason(text))
 
 
 def _dismiss_chrome_menus(driver: WebDriver) -> None:
@@ -6023,7 +6274,7 @@ def _pick_ban_probes(catalog: List[str], rng: random.Random) -> List[str]:
     return chosen
 
 
-def _ban_probe_profile_menu(driver: WebDriver, label: str) -> bool:
+def _ban_probe_profile_menu(driver: WebDriver, label: str) -> str:
     """Avatar check with a random shape so every sitting is not the same hover."""
     rng = _rng()
     icon = None
@@ -6034,7 +6285,7 @@ def _ban_probe_profile_menu(driver: WebDriver, label: str) -> bool:
             time.sleep(rng.uniform(0.25, 0.7))
     if icon is None:
         log(f"[Profile {label}] No profile icon — trying another ban check")
-        return False
+        return ""
     style = rng.choice(("hover", "hover_click", "click", "js_hover"))
     log(f"[Profile {label}] Ban check via profile menu ({style})")
     try:
@@ -6050,7 +6301,7 @@ def _ban_probe_profile_menu(driver: WebDriver, label: str) -> bool:
         except Exception as exc:
             log(f"[Profile {label}] Profile hover skipped ({brief_error(exc)})")
             if style == "hover":
-                return False
+                return ""
     if style == "js_hover":
         try:
             driver.execute_script(
@@ -6082,14 +6333,52 @@ def _ban_probe_profile_menu(driver: WebDriver, label: str) -> bool:
     elif style != "js_hover":
         time.sleep(rng.uniform(0.6, 1.5))
     shown = _hover_popup_text(driver)
-    banned = _popup_says_banned(shown) or _page_says_banned(driver)
-    if banned:
-        log(f"[Profile {label}] Profile menu showed a ban / server-error notice")
+    reason = _popup_dead_reason(shown) or _page_dead_reason(driver)
+    if reason:
+        log(f"[Profile {label}] Profile menu showed {reason}")
     _dismiss_chrome_menus(driver)
-    return banned
+    return reason
 
 
-def _ban_probe_open_url(driver: WebDriver, label: str, url: str, what: str) -> bool:
+def hover_profile_icon_for_error(
+    driver: WebDriver,
+    label: str,
+    user_id: str,
+    stats: Optional[AccountSummary],
+) -> bool:
+    """Hold the cursor on the avatar. True when the popup means this account must close."""
+    if stats is None or stats.is_banned():
+        return False
+    icon = _profile_icon(driver)
+    if icon is None:
+        return False
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'nearest', inline:'nearest'});", icon
+        )
+    except Exception:
+        pass
+    hold = _rng().uniform(1.0, 3.0)
+    try:
+        ActionChains(driver).move_to_element(icon).pause(hold).perform()
+    except Exception as exc:
+        log(f"[Profile {label}] Profile icon hover skipped ({brief_error(exc)})")
+        return False
+    shown = _hover_popup_text(driver)
+    reason = _popup_dead_reason(shown) or _page_dead_reason(driver)
+    _dismiss_chrome_menus(driver)
+    if not reason:
+        return False
+    if _reason_is_server_error(reason):
+        reason = "we had a server error"
+    stats.account_status = reason
+    persist_inside_ban(user_id or stats.user_id, reason)
+    log(f"[Profile {label}] Profile icon showed {reason} — closing this account")
+    stats.print_report()
+    return True
+
+
+def _ban_probe_open_url(driver: WebDriver, label: str, url: str, what: str) -> str:
     log(f"[Profile {label}] Ban check via {what}")
     try:
         navigate(driver, url, label)
@@ -6097,15 +6386,19 @@ def _ban_probe_open_url(driver: WebDriver, label: str, url: str, what: str) -> b
         dismiss_popups(driver)
     except Exception as exc:
         log(f"[Profile {label}] {what} check skipped ({brief_error(exc)})")
-        return False
-    if _page_says_banned(driver) or _popup_says_banned(_hover_popup_text(driver)):
-        log(f"[Profile {label}] {what} showed this account is banned")
-        return True
+        return ""
+    reason = _page_dead_reason(driver) or _popup_dead_reason(_hover_popup_text(driver))
+    if reason:
+        log(f"[Profile {label}] {what} showed {reason}")
+        return reason
     blocked = home_account_block_reason(driver, True)
     if blocked == "account banned":
         log(f"[Profile {label}] {what} showed this account is banned")
-        return True
-    return False
+        return "the account is banned"
+    if blocked == "server error":
+        log(f"[Profile {label}] {what} showed we had a server error")
+        return "we had a server error"
+    return ""
 
 
 def _ban_probe_about_json(driver: WebDriver, label: str, username: str) -> bool:
@@ -6135,6 +6428,8 @@ def account_ban_reason(
     blocked = home_account_block_reason(driver, logged_in)
     if blocked == "account banned":
         return "the account is banned"
+    if blocked == "server error":
+        return "we had a server error"
     if blocked:
         return blocked
 
@@ -6150,7 +6445,7 @@ def account_ban_reason(
     )
     left_home = False
     for name in chosen:
-        banned = False
+        reason = ""
         try:
             if name == "profile_menu":
                 if left_home:
@@ -6159,19 +6454,19 @@ def account_ban_reason(
                         left_home = False
                     except Exception:
                         pass
-                banned = _ban_probe_profile_menu(driver, label)
+                reason = _ban_probe_profile_menu(driver, label)
             elif name == "notifications":
-                banned = _ban_probe_open_url(
+                reason = _ban_probe_open_url(
                     driver, label, "https://www.reddit.com/notifications", "notifications"
                 )
                 left_home = True
             elif name == "settings":
-                banned = _ban_probe_open_url(
+                reason = _ban_probe_open_url(
                     driver, label, "https://www.reddit.com/settings", "settings"
                 )
                 left_home = True
             elif name == "inbox":
-                banned = _ban_probe_open_url(
+                reason = _ban_probe_open_url(
                     driver,
                     label,
                     "https://www.reddit.com/message/inbox",
@@ -6179,7 +6474,7 @@ def account_ban_reason(
                 )
                 left_home = True
             elif name == "own_profile" and username:
-                banned = _ban_probe_open_url(
+                reason = _ban_probe_open_url(
                     driver,
                     label,
                     f"https://www.reddit.com/user/{username}/",
@@ -6187,12 +6482,13 @@ def account_ban_reason(
                 )
                 left_home = True
             elif name == "about_json" and username:
-                banned = _ban_probe_about_json(driver, label, username)
+                if _ban_probe_about_json(driver, label, username):
+                    reason = "the account is suspended"
         except Exception as exc:
             log(f"[Profile {label}] Ban check {name} skipped ({brief_error(exc)})")
-            banned = False
-        if banned:
-            return "the account is banned"
+            reason = ""
+        if reason:
+            return reason
         time.sleep(rng.uniform(0.35, 1.4))
     if left_home:
         try:
@@ -6217,16 +6513,24 @@ def _account_payload_suspended(data: Dict[str, Any]) -> bool:
     return False
 
 
+def _reason_is_server_error(reason: str) -> bool:
+    text = (reason or "").lower()
+    return "server error" in text or "we had a server" in text or "we had server" in text
+
+
 def _reason_is_ban(reason: str) -> bool:
     text = (reason or "").lower()
-    return "banned" in text or "suspend" in text
+    return "banned" in text or "suspend" in text or _reason_is_server_error(reason)
 
 
 def confirm_ban_sign(driver: WebDriver, label: str, first_reason: str) -> str:
     """
     Strike 2: reload Home and look again. Returns the confirmed reason, or ''
     when the second look is clean (a false alarm).
+    A server-error popup is already enough — Home often looks fine after it.
     """
+    if _reason_is_server_error(first_reason):
+        return "we had a server error"
     log(f"[Profile {label}] Ban sign ({first_reason}) — reloading Home to check again")
     time.sleep(_rng().uniform(3.0, 6.0))
     try:
@@ -6245,6 +6549,8 @@ def confirm_ban_sign(driver: WebDriver, label: str, first_reason: str) -> str:
     again = home_account_block_reason(driver, bool(info.get("username")))
     if again == "account banned":
         return "the account is banned"
+    if again == "server error" or _reason_is_server_error(again):
+        return "we had a server error"
     return again
 
 
@@ -6255,17 +6561,32 @@ def handle_ban_sign(
     stats: AccountSummary,
     first_reason: str,
 ) -> bool:
-    """True when the sign is confirmed and this account must close."""
+    """True when this account must close now. Ban signs do not wait for a Home reload."""
+    if _reason_is_ban(first_reason):
+        confirmed = (
+            "we had a server error"
+            if _reason_is_server_error(first_reason)
+            else first_reason
+        )
+        stats.account_status = confirmed
+        persist_inside_ban(user_id, confirmed)
+        log(f"[Profile {label}] Closing this account now ({confirmed})")
+        stats.print_report()
+        return True
     confirmed = confirm_ban_sign(driver, label, first_reason)
     if not confirmed:
         log(f"[Profile {label}] Ban sign was a false alarm — continuing")
         return False
+    if _reason_is_server_error(confirmed):
+        confirmed = "we had a server error"
     stats.account_status = confirmed
     if _reason_is_ban(confirmed):
         persist_inside_ban(user_id, confirmed)
-    log(f"[Profile {label}] Confirmed twice — closing this account ({confirmed})")
-    stats.print_report()
-    return True
+        log(f"[Profile {label}] Closing this account now ({confirmed})")
+        stats.print_report()
+        return True
+    log(f"[Profile {label}] Ban sign was a false alarm — continuing")
+    return False
 
 
 def read_logged_in_account(driver: WebDriver, label: str) -> Dict[str, Any]:
@@ -7717,6 +8038,26 @@ DEADLINE_PAUSE_GRACE = 15.0  # total seconds a sitting's pauses may run past its
 WIND_DOWN_SECONDS = (5.0, 25.0)
 
 
+def hung_deadline_from(started_at: float, wait_seconds: Optional[float] = None) -> float:
+    wait = float(
+        warmup_ladder.HUNG_START_SECONDS if wait_seconds is None else wait_seconds
+    )
+    return float(started_at) + wait
+
+
+def hung_start_overrun(
+    started_at: float, now: float, wait_seconds: Optional[float] = None
+) -> bool:
+    return float(now) > hung_deadline_from(started_at, wait_seconds)
+
+
+def activity_deadline(
+    session_start: float, session_seconds: float, wind_down: float
+) -> float:
+    """Browse stop time. Open/proxy wait is not added."""
+    return float(session_start) + float(session_seconds) - float(wind_down)
+
+
 def set_session_deadline(when: Optional[float]) -> None:
     """Hard stop for this account's sitting. New actions stop at it."""
     _tls.deadline = when
@@ -8965,7 +9306,7 @@ def upvote_random_post(
     """Click a random un-upvoted upvote button. Never clicks downvote."""
     prefix = f"[Profile {label}] " if label else ""
     if stats is not None:
-        allowed, why = warmup_ladder.may_upvote(stats.account_age_days)
+        allowed, why = warmup_ladder.may_upvote(stats.account_age_days, stats=stats)
         if not allowed:
             return False
         if int(stats.upvote_target or 0) <= 0:
@@ -8976,7 +9317,9 @@ def upvote_random_post(
             from reddit_joiner.store import votes_today_for_account
 
             today = votes_today_for_account(stats.user_id)
-            lo, hi = warmup_ladder.upvote_post_budget(stats.account_age_days)
+            lo, hi = warmup_ladder.upvote_post_budget(
+                stats.account_age_days, stats=stats
+            )
             if today >= max(int(hi), int(stats.upvote_target or hi)):
                 return False
         except Exception:
@@ -10117,14 +10460,14 @@ def _account_karma_age(stats: AccountSummary) -> Tuple[int, float]:
 
 
 def account_in_warmup(stats: AccountSummary) -> bool:
-    """True while comments are still locked (under day 8). Joins and later upvotes still run."""
+    """True while comments are still locked for this account."""
     allowed, _why = account_may_general_comment(stats)
     return not allowed
 
 
 def warmup_reason(stats: AccountSummary) -> str:
     _allowed, why = account_may_general_comment(stats)
-    return why or warmup_ladder.day_band_label(stats.account_age_days)
+    return why or warmup_ladder.day_band_label(stats.account_age_days, stats=stats)
 
 
 def _join_cycle_iso() -> str:
@@ -10135,12 +10478,13 @@ def may_join_now(
     stats: AccountSummary, subreddit: str = "", *, for_post: bool = False
 ) -> Tuple[bool, str]:
     age = float(stats.account_age_days or 0)
-    allowed, why = warmup_ladder.may_join(age, subreddit)
+    allowed, why = warmup_ladder.may_join(age, subreddit, stats=stats)
     if not allowed:
         return False, why
     if for_post:
         return True, ""
-    if len(stats.joined) >= MAX_JOINS_PER_SESSION:
+    join_budget = int(stats.join_target or 0) or int(MAX_JOINS_PER_SESSION)
+    if len(stats.joined) >= join_budget:
         return (
             False,
             f"already joined {len(stats.joined)} community this sitting",
@@ -10794,6 +11138,7 @@ def perform_browse_activity(
     end_at = time.time() + max(0.0, float(duration))
     comments_left = 0
     last_pulse = 0.0
+    last_profile_hover = float(getattr(_tls, "profile_hover_at", 0.0) or 0.0)
     pulse_every = (style.pulse_every if style else 30.0) if duration >= 60 else 8.0
     menu = _activity_menu(style)
     muted = set(menu.muted)
@@ -10823,6 +11168,9 @@ def perform_browse_activity(
         remaining = end_at - time.time()
         if remaining <= 0:
             break
+        if stats is not None and stats.is_banned():
+            log(f"{prefix}Account is closed — stopping browse")
+            return
         if not current_is_reddit(driver):
             try:
                 if stay_url:
@@ -10833,6 +11181,18 @@ def perform_browse_activity(
                 log(f"{prefix}Stopped activity ({brief_error(exc)})")
                 return
         now = time.time()
+        if (
+            stats is not None
+            and remaining > 4.0
+            and now - last_profile_hover >= 25.0
+            and _rng().random() < 0.16
+        ):
+            last_profile_hover = now
+            _tls.profile_hover_at = now
+            if hover_profile_icon_for_error(
+                driver, label, user_id or stats.user_id, stats
+            ):
+                return
         if now - last_pulse >= pulse_every:
             left_m = remaining / 60.0
             if left_m >= 1.5:
@@ -14188,7 +14548,7 @@ def maybe_do_session_post(
         f"[Profile {label}] Mid-session post "
         f"(1 attempt this run, max {POSTS_PER_WINDOW} LIVE/{ACTION_WINDOW_HOURS:.0f}h, "
         f"karma {stats.account_karma}/{MIN_KARMA_TO_POST}, "
-        f"{warmup_ladder.day_band_label(stats.account_age_days)}"
+        f"{warmup_ladder.day_band_label(stats.account_age_days, stats=stats)}"
         + (", sheet row assigned" if has_sheet else ", no posts.csv row")
         + ")"
     )
@@ -14339,6 +14699,8 @@ def continue_general_activity_in_subs(
     else:
         shares = [1.0 / len(use)] * len(use)
     for name, share in zip(use, shares):
+        if stats is not None and stats.is_banned():
+            break
         if leftover < MIN_LEFTOVER_HOME:
             break
         dwell = min(max(MIN_LEFTOVER_HOME, float(seconds) * share), leftover)
@@ -14391,34 +14753,13 @@ def process_profile(
         return stats
 
     try:
-        from reddit_joiner.store import get_account_outside_status
-
-        outside = get_account_outside_status(user_id)
-    except Exception:
-        outside = ""
-    if outside in {"BANNED", "SUSPENDED"}:
-        stats.account_status = (
-            "the account is suspended" if outside == "SUSPENDED" else "the account is banned"
-        )
-        log(
-            f"[Profile {label}] Skipping — outside lookup {outside} "
-            "(not opening AdsPower)"
-        )
-        try:
-            disable_account_in_sheet(user_id, reason=f"outside lookup {outside}")
-        except Exception:
-            pass
-        stats.print_report()
-        return stats
-
-    try:
         begin_session_rng(user_id, label)
         _tls.batch_user_id = user_id
         stats.target_group = ""
         target = set_session_target(user_id, label)
         if target:
             stats.target_group = str(target.get("group") or "") or "all targets"
-        open_deadline = time.time() + float(warmup_ladder.HUNG_START_SECONDS)
+        ads_started_at = time.time()
         try:
             data = start_profile(
                 user_id,
@@ -14437,13 +14778,13 @@ def process_profile(
                 "sitting not counted, will retry later"
             )
             return stats
-        if time.time() > open_deadline:
-            log(f"[Profile {label}] Hung start — closing before login")
+        if hung_start_overrun(ads_started_at, time.time()):
+            log(f"[Profile {label}] Hung start — AdsPower did not open")
             stats.sitting_ok = False
             stats.post_note = "hung start"
             return stats
         raise_profile_browser(label)
-        stats.proxy_ip = wait_for_proxy_ip(driver, label, user_id) or ""
+        stats.proxy_ip = refresh_proxy_ip_then_ready(driver, label, user_id) or ""
         note_account_ip(label, user_id, stats.proxy_ip)
 
         log(f"[Profile {label}] Step 1 done — proxy IP ready. Opening Reddit Home.")
@@ -14455,6 +14796,7 @@ def process_profile(
                 raise
             if handle_ban_sign(driver, label, user_id, stats, blocked):
                 return stats
+        login_started_at = time.time()
         logged_in = False
         try:
             info = read_logged_in_account(driver, label)
@@ -14472,8 +14814,8 @@ def process_profile(
         blocked = account_ban_reason(driver, label, stats, info, logged_in)
         if blocked and handle_ban_sign(driver, label, user_id, stats, blocked):
             return stats
-        if time.time() > open_deadline:
-            log(f"[Profile {label}] Hung start — Reddit did not finish login in 3 min")
+        if hung_start_overrun(login_started_at, time.time()):
+            log(f"[Profile {label}] Hung start — login check stuck")
             stats.sitting_ok = False
             stats.post_note = "hung start"
             return stats
@@ -14488,6 +14830,10 @@ def process_profile(
             )
         else:
             log(f"[Profile {label}] Could not read karma/age — treating this account as new")
+        log(
+            f"[Profile {label}] Unlock days — "
+            f"{warmup_ladder.unlocks_for(user_id, stats).describe()}"
+        )
 
         style, browse_list, fingerprint = unique_session_plan(
             user_id,
@@ -14503,12 +14849,24 @@ def process_profile(
             style.search_n = max(1, min(int(style.search_n or 1), 1))
             if style.menu.search_when == "none":
                 style.menu.search_when = _rng().choice(("after_home", "after_first_hop"))
+        if not account_may_explore(user_id):
+            style.explore_n = 0
+        else:
+            lo, hi = RANDOM_EXPLORE_PER_SESSION
+            lo_n = max(1, int(lo))
+            hi_n = max(lo_n, int(hi))
+            n = int(style.explore_n or 0)
+            if n < lo_n or n > hi_n:
+                style.explore_n = _rng().randint(lo_n, hi_n)
         style.session_seconds = warmup_ladder.scale_sitting_seconds(
-            style.session_seconds, stats.account_age_days
+            style.session_seconds, stats.account_age_days, stats=stats
         )
-        stats.upvote_target = warmup_ladder.pick_upvote_target(stats.account_age_days)
-        young_band = warmup_ladder.day_band(stats.account_age_days)
-        if young_band == "days_1_3":
+        stats.upvote_target = warmup_ladder.pick_upvote_target(
+            stats.account_age_days, stats=stats
+        )
+        stats.join_target = _rng().randint(1, int(MAX_JOINS_PER_SESSION))
+        young_band = warmup_ladder.day_band(stats.account_age_days, stats=stats)
+        if young_band == "quiet":
             muted = [name for name in style.menu.muted if name]
             if "open-post" not in muted:
                 muted.append("open-post")
@@ -14517,8 +14875,8 @@ def process_profile(
             style.click_post_chance = min(float(style.click_post_chance), 0.05)
             style.community_post_chance = min(float(style.community_post_chance), 0.08)
             log(
-                f"[Profile {label}] Days 1-3 quiet sitting — Home first, "
-                "no Join, few post opens, no explore"
+                f"[Profile {label}] Quiet sitting — Home first, "
+                "join and upvote still locked, few post opens, no explore"
             )
         if int(stats.upvote_target or 0) <= 0:
             muted = [name for name in style.menu.muted if name]
@@ -14529,17 +14887,29 @@ def process_profile(
         else:
             n = int(stats.upvote_target)
             upvote_note = f"this sitting: {n} upvote{'s' if n != 1 else ''}"
+        join_n = int(stats.join_target or 0)
+        join_note = (
+            f"this sitting: {join_n} join{'s' if join_n != 1 else ''}"
+            if join_n > 0
+            else "this sitting: skip joins"
+        )
         log(
-            f"[Profile {label}] {warmup_ladder.day_band_label(stats.account_age_days)} "
-            f"— sitting {style.session_seconds / 60:.1f} min, {upvote_note}"
+            f"[Profile {label}] {warmup_ladder.day_band_label(stats.account_age_days, stats=stats)} "
+            f"— sitting {style.session_seconds / 60:.1f} min, {upvote_note}, {join_note}"
         )
         set_current_style(style)
         session_start = time.time()
         stats.session_started_at = session_start
         wind_down_for = _rng().uniform(*WIND_DOWN_SECONDS)
-        session_end = session_start + float(style.session_seconds) - wind_down_for
+        session_end = activity_deadline(
+            session_start, float(style.session_seconds), wind_down_for
+        )
         # Hard stop for new actions; the wind-down fills the reserved tail
         set_session_deadline(session_end)
+        log(
+            f"[Profile {label}] Activity sitting starts now — "
+            f"{style.session_seconds / 60:.0f} min (open and proxy wait not counted)"
+        )
         _tls.cursor = None
         _tls.viewport = None
         # Re-probe the scroll engines for every profile: whether synthesized
@@ -14549,6 +14919,7 @@ def process_profile(
         _tls.wheel_misses = 0
         _tls.gesture_misses = 0
         _tls.scrolled_px = 0.0
+        _tls.profile_hover_at = 0.0
         post_mid_at = session_start + float(style.session_seconds) * float(
             style.post_fraction
         )
@@ -14574,14 +14945,8 @@ def process_profile(
             for name in browse_list
             if name and normalize_subreddit(name).lower() in allowed_set
         ]
-        if young_band == "days_1_3":
-            _rng().shuffle(browse_list)
-            if session_target() and browse_list:
-                browse_list = browse_list[:1]
-            elif not browse_list or _rng().random() < 0.35:
-                browse_list = []
-            else:
-                browse_list = browse_list[:1]
+        if young_band == "quiet":
+            browse_list = keep_quiet_sheet_pick(browse_list)
         hops = list(browse_list)
         sheet_slots = unused_sheet_comment_slots(user_id, name=label, serial=serial)
         has_sheet_links = sheet_slots > 0
@@ -14697,9 +15062,13 @@ def process_profile(
             style.home_first_seconds,
             "first Home stretch",
         )
+        if stats.is_banned():
+            return stats
         search_done = [False]
 
         def _run_menu_search() -> None:
+            if stats.is_banned():
+                return
             if search_done[0] or max(0, int(style.search_n)) <= 0:
                 return
             if session_end - time.time() < SEARCH_MIN_REMAINING:
@@ -14769,21 +15138,16 @@ def process_profile(
                         for name in explore
                     )
                 )
-        hops = [name for name in browse_list if not is_blocked_subreddit(name)]
-        seen_hops = {name.lower() for name in hops}
+        sheet_hops = [name for name in browse_list if not is_blocked_subreddit(name)]
+        other_hops: List[str] = []
+        seen_hops = {name.lower() for name in sheet_hops}
         for name in explore:
             key = name.lower()
             if key in seen_hops or is_blocked_subreddit(name):
                 continue
-            hops.append(name)
+            other_hops.append(name)
             seen_hops.add(key)
-        sheet_hops = [name for name in hops if name.lower() in allowed_set]
-        other_hops = [name for name in hops if name.lower() not in allowed_set]
-        need_sheet_first = bool(
-            stats.session_comment_target
-            or (COMMUNITY_GENERAL_POST and not has_sheet_post)
-        )
-        hops = sheet_hops + other_hops
+        hops = order_sheet_then_explore(sheet_hops, other_hops)
         hops = [
             name
             for name in hops
@@ -14791,20 +15155,6 @@ def process_profile(
             or name.lower() in {item.lower() for item in explore}
             or (sheet_target and name.lower() == sheet_target.lower())
         ]
-        _rng().shuffle(hops)
-        # A comment or general post still needs a sheet community early enough
-        # to fit. Its slot is random inside the first half, not always first.
-        if need_sheet_first and sheet_hops and len(hops) > 1:
-            sheet_keys = {name.lower() for name in sheet_hops}
-            first_sheet = next(
-                (i for i, name in enumerate(hops) if name.lower() in sheet_keys),
-                None,
-            )
-            window = max(1, (len(hops) + 1) // 2)
-            if first_sheet is not None and first_sheet >= window:
-                slot = _rng().randint(0, window - 1)
-                moved = hops.pop(first_sheet)
-                hops.insert(slot, moved)
         if sheet_target:
             hops = plan_sheet_post_return_hops(hops, sheet_target)
         kept_hops: List[str] = []
@@ -14819,7 +15169,7 @@ def process_profile(
                 log(f"[Profile {label}] Holding r/{name} this run — {cool}")
                 continue
             kept_hops.append(name)
-        hops = kept_hops
+        hops = unique_session_hops(kept_hops)
         if hops:
             _, style.home_between = plan_home_budget(
                 style.session_seconds,
@@ -14912,7 +15262,8 @@ def process_profile(
                     f"[Profile {label}] Not enough sitting left to join r/{sheet_target} "
                     "before the hops — will still post later if there is time"
                 )
-        deferred_hops: set = set()
+        if stats.is_banned():
+            return stats
         visited_hops: List[str] = []
         first_hop_attempted = [False]
 
@@ -14927,6 +15278,8 @@ def process_profile(
             _run_menu_search()
         for index, subreddit in enumerate(hops, start=1):
             remaining = session_end - time.time()
+            if stats.is_banned():
+                break
             if stop_requested():
                 log(f"[Profile {label}] Stopping this sitting")
                 break
@@ -15000,18 +15353,10 @@ def process_profile(
                     how=way,
                 )
                 if not opened:
-                    key = subreddit.lower()
-                    if key not in deferred_hops:
-                        deferred_hops.add(key)
-                        hops.append(subreddit)
-                        log(
-                            f"[Profile {label}] Will try r/{subreddit} again later this sitting"
-                        )
-                    else:
-                        log(
-                            f"[Profile {label}] Skipping r/{subreddit} — another account "
-                            "still has it open"
-                        )
+                    log(
+                        f"[Profile {label}] Skipping r/{subreddit} this sitting — "
+                        "another account still has it open"
+                    )
                     _after_first_hop_attempt()
                     continue
                 visited_hops.append(subreddit)
@@ -15122,6 +15467,27 @@ def process_profile(
                     stats=stats,
                     stay_url=url,
                 )
+                if stats.is_banned():
+                    community_seconds += time.time() - sub_started
+                    break
+                if is_sheet:
+                    allowed_vote, _vote_why = warmup_ladder.may_upvote(
+                        stats.account_age_days, stats=stats
+                    )
+                    if (
+                        allowed_vote
+                        and int(stats.upvote_target or 0) > 0
+                        and int(stats.upvotes or 0) < int(stats.upvote_target)
+                    ):
+                        log(
+                            f"[Profile {label}] Upvote unlocked — one upvote in r/{subreddit}"
+                        )
+                        try:
+                            upvote_random_post(
+                                driver, label, stats, read_first=True
+                            )
+                        except Exception:
+                            pass
                 have_week, room = general_comment_need(
                     user_id, session_want=stats.session_comment_target
                 )
@@ -15159,10 +15525,11 @@ def process_profile(
                 except Exception:
                     skip_why = ""
                 if first_visit and account_in_warmup(stats):
+                    comment_from = warmup_ladder.unlocks_for(stats=stats).comment_day
                     log(
                         f"[Profile {label}] First visit to r/{subreddit} — "
-                        "rules and join only, comment after the account is "
-                        f"{GENERAL_COMMENT_MIN_AGE_DAYS} days old"
+                        "rules and join only, comment after day "
+                        f"{comment_from} for this account"
                     )
                     should_comment = False
                 elif first_visit:
@@ -15335,7 +15702,11 @@ def process_profile(
 
         leftover = session_end - time.time()
         leftover_dest = style.menu.leftover_dest if style.menu else "home"
-        if stop_requested():
+        if leftover_dest == "visited_subs":
+            leftover_dest = "home"
+        if stats.is_banned():
+            log(f"[Profile {label}] Sitting stopped — {stats.account_status}")
+        elif stop_requested():
             log(f"[Profile {label}] Stopped — closing this account")
         elif leftover <= MIN_LEFTOVER_HOME:
             log(
@@ -15347,13 +15718,6 @@ def process_profile(
                 f"[Profile {label}] Skipping leftover {leftover:.0f}s — "
                 "this sitting's menu closes after hops"
             )
-        elif leftover_dest == "visited_subs" and visited_hops:
-            log(
-                f"[Profile {label}] Leftover {leftover:.0f}s in communities already visited"
-            )
-            continue_general_activity_in_subs(
-                driver, label, user_id, stats, visited_hops, leftover
-            )
         else:
             home_seconds += hop_reddit_home(
                 driver,
@@ -15363,14 +15727,17 @@ def process_profile(
                 leftover,
                 "leftover sitting on Home",
             )
-        allowed_vote, _vote_why = warmup_ladder.may_upvote(stats.account_age_days)
+        allowed_vote, _vote_why = warmup_ladder.may_upvote(
+            stats.account_age_days, stats=stats
+        )
         if (
             allowed_vote
             and int(stats.upvote_target or 0) > 0
             and int(stats.upvotes or 0) <= 0
             and not stop_requested()
+            and not stats.is_banned()
         ):
-            log(f"[Profile {label}] Day-4+ streak — leaving one upvote before closing")
+            log(f"[Profile {label}] Upvote unlocked — leaving one upvote before closing")
             try:
                 upvote_random_post(driver, label, stats, read_first=True)
             except Exception:
@@ -15396,7 +15763,7 @@ def process_profile(
         # Browsing is done — release the clamp so the post / comment flows below
         # keep their natural typing and review pacing.
         set_session_deadline(None)
-        if stop_requested():
+        if stop_requested() or stats.is_banned():
             pass
         elif not session_post_done[0] and sheet_target:
             try:
@@ -15430,7 +15797,7 @@ def process_profile(
                 preferred_sub=(browse_list[0] if browse_list else ""),
             )
 
-        if not stop_requested():
+        if not stop_requested() and not stats.is_banned():
             maybe_leave_weekly_comments(
                     driver,
                     label,
@@ -15640,9 +16007,9 @@ def _launch_profile_wave(
 
 def account_is_dead(user_id: str) -> bool:
     try:
-        from reddit_joiner.store import account_outside_status_is_dead
+        from reddit_joiner.store import account_inside_status_is_dead
 
-        return account_outside_status_is_dead(user_id)
+        return account_inside_status_is_dead(user_id)
     except Exception:
         return False
 
@@ -15670,6 +16037,7 @@ def run_profiles(
     global _CYCLE_STARTED_ISO
     _CYCLE_STARTED_ISO = datetime.now().isoformat(timespec="seconds")
     assign_batch_search_accounts(targets)
+    assign_batch_explore_accounts(targets)
     schedules = assign_profile_schedules(targets)
     log("Assigned a random sitting time and start time for each profile:")
     for profile in targets:
@@ -15786,10 +16154,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log(disk_error)
         return 1
     log(
-        "Warmup file: "
-        f"comments from day {warmup_ladder.COMMENT_MIN_AGE_DAYS}, "
-        f"upvotes from day {warmup_ladder.UPVOTE_MIN_AGE_DAYS}, "
-        f"posts from day {warmup_ladder.POST_MIN_AGE_DAYS}"
+        "Warmup file: upvote/join/comment from day 2 "
+        "(join 2–5, comment 2–8, post 8–16); one visit per subreddit this sitting"
     )
     ensure_accounts_sheet()
     ensure_subreddits_sheet()
@@ -15797,17 +16163,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from reddit_joiner.store import init_db as _init_status_db
 
         _init_status_db()
-        imported = load_outside_lookup_reports()
-        if imported:
-            log(f"Outside lookup: stored status for {imported} account(s)")
-        disabled = apply_dead_status_to_accounts_sheet()
-        if disabled:
-            log(
-                f"Outside lookup: disabled {disabled} banned/suspended row(s) in "
-                f"{os.path.basename(accounts_sheet_path())}"
-            )
     except Exception as exc:
-        log(f"Could not load outside lookup ({brief_error(exc)})")
+        log(f"Could not open activity store ({brief_error(exc)})")
     accounts_name = os.path.basename(accounts_sheet_path())
     subs_name = os.path.basename(subreddits_sheet_path())
     PROFILE_IDS = load_profile_ids()
@@ -15843,9 +16200,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         f"({'all open together' if PARALLEL_PROFILES else 'one by one'}) | "
         f"Browse extras: {len(SUBREDDITS)} from {subs_name} | "
         f"{SUBREDDITS_PER_SESSION[0]}–{SUBREDDITS_PER_SESSION[1]} general "
-        f"(AskUK / NoStupidQuestions / Advice) + "
-        f"{RANDOM_EXPLORE_PER_SESSION[0]}–{RANDOM_EXPLORE_PER_SESSION[1]} random explore "
-        f"(skip {EXPLORE_SKIP_SESSIONS} sitting per account)"
+        f"(AskUK / NoStupidQuestions / Advice); explore on 3–5% of accounts this session "
+        f"({RANDOM_EXPLORE_PER_SESSION[0]}–{RANDOM_EXPLORE_PER_SESSION[1]} extras)"
     )
     log(
         f"Each account: own random sitting ({SESSION_SECONDS_RANGE[0] // 60}–"
@@ -15974,19 +16330,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if KARMA_GROWTH_ENABLED:
         log(
             f"Per account: {SESSION_SECONDS_RANGE[0] // 60}–{SESSION_SECONDS_RANGE[1] // 60} min sitting, "
-            f"join from day {warmup_ladder.JOIN_MIN_AGE_DAYS}, upvotes from day {warmup_ladder.UPVOTE_MIN_AGE_DAYS}, "
-            f"{COMMENTS_PER_WINDOW} comment/day from day {GENERAL_COMMENT_MIN_AGE_DAYS}, "
-            f"post from day {warmup_ladder.POST_MIN_AGE_DAYS} every "
+            "upvote/join/comment from day 2 (join 2–5, comment 2–8, post 8–16), "
+            f"{COMMENTS_PER_WINDOW} comment/day after that account's comment day, "
+            f"post after its post day every "
             f"{warmup_ladder.POST_GAP_DAYS[0]}–{warmup_ladder.POST_GAP_DAYS[1]} days"
         )
     log(
-        f"Each sitting is a new random mix: {SESSION_SECONDS_RANGE[0] // 60}–"
+        f"Each sitting is a new random mix this account has not used before: "
+        f"{SESSION_SECONDS_RANGE[0] // 60}–"
         f"{SESSION_SECONDS_RANGE[1] // 60} min, Home "
         f"{int(HOME_ACTIVITY_SHARE_RANGE[0]*100)}–{int(HOME_ACTIVITY_SHARE_RANGE[1]*100)}%, "
         f"community visits under {MAX_SUBREDDIT_DWELL:.0f}s. "
-        f"Each account: {COMMENTS_PER_WINDOW} comment per day from day "
-        f"{GENERAL_COMMENT_MIN_AGE_DAYS}, {POSTS_PER_WINDOW} post from day "
-        f"{warmup_ladder.POST_MIN_AGE_DAYS}. "
+        f"Each account: {COMMENTS_PER_WINDOW} comment per day after its comment day, "
+        f"{POSTS_PER_WINDOW} post after its post day. "
         "If comments.csv / posts.csv have unused rows, those go first; "
         f"if posts.csv is empty, one general post is written in a {_subs_sheet_name()} "
         "community after its rules and recent posts are read. "

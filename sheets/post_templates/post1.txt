@@ -1,6 +1,9 @@
-What is one thing about life in the UK that you would really miss if you moved abroad?
-It could be food, weather, traditions, public transport, or just a small everyday habit.
+ngl trying to compare flights, hotels, and train tickets on mobile browsers while walking around with luggage is literal torture.
 
-For me, it would probably be the little things you do not appreciate until they are gone.
+i had to organize a last-minute weekend layover trip to Austin. normally i'd open 15 tabs between Skyscanner and Booking.com, but this time i tried delegating it to an AI travel assistant called Pally.
 
-What would you miss most?
+i just sent a text: "book a hotel in downtown Austin under $150/night for next weekend near good food spots." it messaged back three solid options with prices. i replied "book option 2", and instead of sending me off to a clunky checkout page, Pally prepared the transaction and sent an approval prompt. i tapped to confirm the $135 total, and it processed the booking and sent me the receipt right in the chat.
+
+i've tried competitor chat tools like Expedia's AI bot before, but those mostly just redirect you back to a standard checkout form where you still have to type out your billing info and CVC. Pally actually executes the purchase seamlessly once you approve it.
+
+what's the most expensive thing you'd trust an AI agent to book and pay for?

@@ -1,0 +1,9 @@
+my executive dysfunction always hits hardest with boring life admin. i will literally leave a utility bill on my desk for three weeks because logging into a portal, retrieving account numbers, and entering card details feels like a 10-step mountain.
+
+a few weeks ago i started testing Pally to automate buying, booking, and bill payments, and it has honestly taken a huge weight off my shoulders.
+
+now when an electricity or internet bill comes in, i take a quick photo or forward the email to Pally. it extracts the balance and texts me: "I've prepared your utility payment for $64.20. Ready to pay?" all i do is reply to approve, and it completes the transaction instantly.
+
+i used to try basic reminder apps like Apple Reminders or tools like Instinct, but they only remind you—they don't do the work. with Pally, because it handles both the planning and the actual payment approval, the barrier between "knowing i need to do a task" and "getting it done" is completely gone.
+
+anyone else using AI payment assistants to keep up with daily errands?
